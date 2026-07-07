@@ -1,0 +1,92 @@
+---
+title: "The Telescope Net: Accessible Automated Astronomy"
+sidebarTitle: "Introduction"
+description: "The Telescope Net is an accessible astronomy charity that turns donated Seestar telescopes into an autonomous scientific observation network, submitting data to AAVSO under each member's name."
+---
+
+The Telescope Net is an accessible astronomy charity that operates the world's first planet-wide hunt for the stars that professional observatories miss. Seestar smart telescope owners donate their telescope's nights to the network. The pipeline automatically schedules observations of scientifically valuable targets, processes the data into calibrated photometry, and submits it to professional astronomical databases — with each contributing member credited by name on every accepted observation. Members contribute to real science — supernovae, novae, variable stars, transient phenomena — without physical effort, technical expertise, or significant cost.
+
+<Note>
+  **Accessibility is the founding mission.** Traditional amateur astronomy demands carrying heavy equipment to dark sites, standing in the cold, operating fine controls with precision, and looking through an eyepiece with functional vision. Every one of those requirements excludes someone. The Telescope Net removes all of them. Members do not need to leave their home, touch a telescope, or have any prior astronomy knowledge. The network does the science; members receive the results, the credit, and a genuine connection to the universe.
+</Note>
+
+## What Makes The Telescope Net Unique
+
+Most citizen science programs ask contributors to classify existing images — clicking on galaxies, identifying craters. This is not astronomy. Contributors are not named on scientific outputs, they do not collect original data, and they are not astronomers.
+
+The Telescope Net is different in three ways:
+
+1. **Members collect original data.** Each Seestar node captures fresh photometry every clear night, driven by a real-time alert queue of scientifically valuable targets.
+2. **Members are credited on every submission.** When a measurement passes quality gates and reaches AAVSO's WebObs database, it carries the contributing member's observer code — a permanent, citable scientific record.
+3. **No effort is required after setup.** A one-time ~15-minute setup is all that is needed. Every subsequent night is fully autonomous: the Node Agent wakes at twilight, downloads a plan, controls the telescope, runs photometry, and uploads results without any human intervention.
+
+## The Three-Part System
+
+The network is built on three tightly integrated components that work together every night.
+
+<CardGroup cols={2}>
+  <Card title="Distributed Telescope Network" icon="satellite-dish">
+    Donated Seestar telescopes running the Node Agent software across multiple longitude zones, providing near-continuous 24-hour sky coverage. Each node registers once and then operates fully unattended.
+  </Card>
+  <Card title="AI-Driven Pipeline" icon="brain">
+    A cloud server ingests alerts from six professional streams, scores every target against every node using a composite formula, generates nightly observation plans, cross-validates incoming photometry, and batches accepted measurements to AAVSO.
+  </Card>
+  <Card title="Accessible Member App" icon="mobile">
+    A Flutter app (iOS, Android, and PWA) designed from the ground up for accessibility — full VoiceOver and TalkBack support, haptic light curves, audio descriptions, sonification, and no interactions that require precision or timing.
+  </Card>
+</CardGroup>
+
+## Node Tiers
+
+Nodes are classified into three tiers based on hardware capability. The entire Phase 0–2 network is Tier 1. Tiers 2 and 3 are planned for future phases.
+
+| Tier | Equipment | Filter | Limiting Magnitude | Photometric Precision | Status |
+|------|-----------|--------|--------------------|-----------------------|--------|
+| **1 — Standard** | Seestar S50 or S30 (any model) | Broadband CV/CR | ~14 | 0.05–0.1 mag | Active — primary network |
+| **2 — Filtered** | 6–8″ scope + mono camera + BVRI wheel | Johnson-Cousins BVRI | ~17–18 | 0.01–0.02 mag | Future (Phase 3) |
+| **3 — Spectroscopy** | Tier 2 hardware + spectrograph | — | — | Classification | Future (Phase 3+) |
+
+Anyone with a Seestar can join the network today as a Tier 1 node at no cost. The Node Agent software, scheduling, data processing, and AAVSO submissions are all provided free of charge by The Telescope Net.
+
+## Phase Status
+
+The project follows a four-phase roadmap from a single proof-of-concept observation through to a globally recognised scientific instrument.
+
+| Phase | Status | Goal |
+|-------|--------|------|
+| **Phase 0 — Proof of Concept** | ✅ Code complete | First AAVSO-accepted automated observation from a Seestar, with magnitude agreeing within 0.15 mag of the known value |
+| **Phase 1 — Core System** | 🚀 In progress | One-click installers shipped, member accounts live, founding network site live, Flutter app in development, 3–5 beta nodes running |
+| **Phase 2 — Launch** | 🔜 Next | 50 nodes, member portal app on stores, first ATel published using network data, first grant application submitted |
+| **Phase 3 — Growth** | Not started | 200 nodes across 25+ countries, 10,000+ AAVSO submissions, network paper submitted, Tier 2 filtered nodes introduced |
+
+## Technology Stack
+
+Every component of the system is open and replaceable. The stack was chosen to minimise external dependencies while remaining capable of scaling from 5 nodes to 1,000.
+
+| Layer | Technology | Notes |
+|-------|-----------|-------|
+| Node Agent | Python 3.10+ / Flask | Runs on Windows, macOS, Linux; pip-only dependencies |
+| Telescope control | ALPACA REST via seestar_alp | Vendor-neutral protocol; replaceable in Phase 4 |
+| Plate solving | ASTAP + G18 catalogue | Fast, offline, accurate on Seestar images |
+| Image stacking | NumPy + RANSAC | Sub-pixel alignment, no external binaries |
+| Photometry | astropy + custom aperture code | Differential photometry against AAVSO/Gaia comparison stars |
+| Cloud server | Python / Flask | Upgrade to FastAPI + async at Phase 2 scale |
+| Scoring weights | Claude API (opt-in) | Advisory monitor for observability tuning; hot path stays procedural |
+| Database | SQLite (WAL mode) | Zero-config; migrate to Postgres at ~50 nodes |
+| Member auth | PBKDF2-SHA256 + bearer tokens | 260K rounds, per-user salt, hashed token storage |
+| Sleep prevention | OS-native APIs | `SetThreadExecutionState` (Windows), `caffeinate` (macOS), `systemd-inhibit` (Linux) |
+| Packaging | PyInstaller one-file | NSIS (Windows), pkgbuild/productbuild (macOS), systemd install.sh (Linux) |
+| Marketing site | HTML/CSS/JavaScript (static) | `tour.html` — interactive scrollytelling, Aladin Lite sky visualisation, live API data |
+| Member app | Flutter / Dart (iOS, Android, web) | Real backend integration, AI Help assistant, haptics/TTS, Aladin sky view, push notifications |
+| AI member support | OpenRouter (Claude Haiku) | Rate-limited chat in-app; queues safe config patches for node agents |
+
+## Start Here
+
+<CardGroup cols={2}>
+  <Card title="Set Up Your Node" icon="telescope" href="/node-setup/quickstart">
+    Download the Node Agent, enter your activation code, and have your Seestar contributing to real science in about 15 minutes.
+  </Card>
+  <Card title="How It Works" icon="diagram-project" href="/how-it-works">
+    Follow a single observation from Seestar hardware through alert ingestion, scheduling, photometry, cross-validation, and final AAVSO submission.
+  </Card>
+</CardGroup>

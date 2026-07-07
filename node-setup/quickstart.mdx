@@ -1,0 +1,213 @@
+---
+title: "Node Agent Quickstart: First Science in 15 Minutes"
+sidebarTitle: "Quickstart"
+description: "Install the Telescope Net Node Agent, connect your Seestar, and start contributing science to AAVSO in under 15 minutes with this step-by-step setup guide."
+---
+
+The Telescope Net turns your donated Seestar nights into real science. Once the Node Agent is running on your computer, it connects to your Seestar over your home WiFi, receives nightly observation plans from the cloud scheduler, processes every FITS frame through a calibrated photometry pipeline, and submits measurements to AAVSO under your name — completely automatically, no manual intervention required.
+
+This guide gets you from an unopened box to your first scheduled observation in about fifteen minutes.
+
+## Prerequisites
+
+Before you start, make sure you have everything on hand:
+
+<CardGroup cols={2}>
+  <Card title="Seestar S50 or S30" icon="telescope">
+    Your donated telescope. It must be running the official Seestar app and
+    connected to your home WiFi in **Station Mode** (not Access Point / hotspot
+    mode).
+  </Card>
+  <Card title="Host computer" icon="computer">
+    Any Windows, macOS, or Linux machine that can stay on overnight. A spare
+    laptop on charge works well. The Node Agent is lightweight — it runs
+    alongside anything else on the machine.
+  </Card>
+  <Card title="Home WiFi" icon="wifi">
+    The host computer and the Seestar must be on the **same subnet** so the
+    Node Agent can discover it via ALPACA UDP broadcast on port 32227.
+  </Card>
+  <Card title="Node Activation Code" icon="key">
+    A one-time code in the format `BS-YYYY-XXXXXXXX`, issued from your member
+    account. See [Getting an Activation Code](#getting-an-activation-code)
+    below if you don't have one yet.
+  </Card>
+</CardGroup>
+
+---
+
+## Step-by-Step Setup
+
+<Steps>
+  ### Download the installer for your operating system
+
+  Go to [thetelescope.net/download](https://thetelescope.net/download) and
+  download the installer for your platform:
+
+  - **Windows** — `BoundlessSkiesNode-Setup.exe` (NSIS installer, ~60 MB)
+  - **macOS** — `BoundlessSkiesNode-X.Y.Z-macOS.pkg` (.pkg, ~60 MB)
+  - **Linux** — one-line install script (see [Installation](/node-setup/installation) for details)
+
+  The installer bundles the ASTAP plate-solver binary. The G18 star catalogue
+  (~6 GB) is downloaded on first run via the dashboard setup wizard, so the
+  initial installer download is fast.
+
+  ### Run the installer and enter your Activation Code
+
+  Launch the installer and follow the on-screen prompts. When asked for your
+  **Node Activation Code**, enter the `BS-YYYY-XXXXXXXX` code from your member
+  account page.
+
+  The installer writes the code to `config.yaml` and registers the Node Agent
+  as a background service so it starts automatically at boot. Sleep prevention
+  is configured automatically for your OS.
+
+  <Note>
+    Activation codes are **single-use**. Once the Node Agent sends its first
+    registration request to the cloud, the code is consumed and can never be
+    reused. If you suspect your code was shared or leaked before use, generate
+    a replacement from your account page.
+  </Note>
+
+  ### Enable Station Mode on your Seestar
+
+  Open the **Seestar app** on your phone and navigate to:
+
+  **Settings → Network → Station Mode**
+
+  Enter your home WiFi credentials and let the Seestar reconnect. Once it
+  shows an IP address on your local network (visible in the Seestar app or
+  your router's device list), it is ready for ALPACA discovery.
+
+  <Warning>
+    Do **not** try to connect while the Seestar is in Access Point (hotspot)
+    mode. The ALPACA HTTP service is only active in Station Mode. If you
+    attempt to connect in AP mode, the Node Agent will return the error:
+    `Seestar is in Access Point (hotspot) mode — ALPACA is not active.`
+  </Warning>
+
+  ### Start the Node Agent
+
+  - **Windows / macOS**: the service starts automatically after installation.
+    Open a browser and go straight to step 5.
+  - **Linux**: run `sudo systemctl start telescopenet` (or it auto-starts at
+    boot if you used the install script).
+  - **Dev mode** (from source): `python3 main.py`
+
+  On first start, the Node Agent:
+
+  1. Reads `config.yaml` and finds your activation code.
+  2. Sends a `POST /api/v1/nodes/register` request to
+     `https://api.thetelescope.net` with your hardware payload.
+  3. The cloud validates the code, creates a `node_id` and `api_key`, and
+     returns them.
+  4. Credentials are saved to `data/cloud_state.json` — registration never
+     repeats.
+  5. Begins broadcasting ALPACA UDP discovery on port 32227 to locate your
+     Seestar (timeout: 5 seconds per scan).
+
+  Once your Seestar is found, the Node Agent connects telescope and camera
+  devices and mounts the Seestar SMB share so new FITS files trigger the
+  photometry pipeline automatically.
+
+  ### Open the dashboard at http://localhost:5173
+
+  The local dashboard is a Flask web app served on port 5173. Open it in any
+  browser on the same machine:
+
+  ```
+  http://localhost:5173
+  ```
+
+  You should see all systems green: telescope connected, camera connected,
+  cloud registered, and a heartbeat timestamp updating every 60 seconds.
+
+  The dashboard gives you full visibility and manual control:
+
+  | Tab | Purpose |
+  |-----|---------|
+  | **Telescope** | Slew, park, unpark, tracking toggle, RA/Dec readout |
+  | **Camera** | Manual expose, image history, live preview |
+  | **Schedule** | View the current cloud plan, start/stop manually |
+  | **Photometry** | Last measurement result, history, pipeline status |
+  | **Config** | Edit `config.yaml` in-browser |
+  | **Logs** | Live log stream (Server-Sent Events) |
+</Steps>
+
+---
+
+## Getting an Activation Code
+
+If you do not yet have a Node Activation Code, create a member account at
+[thetelescope.net](https://thetelescope.net) and then request a code either
+from your account settings page or directly via the API:
+
+```bash
+curl -X POST https://api.thetelescope.net/api/v1/me/activation-code \
+     -H "Authorization: Bearer <your_member_token>"
+```
+
+```json
+{
+  "code": "BS-2026-ABCD1234",
+  "expires_at": "2026-09-08T00:00:00Z"
+}
+```
+
+Codes expire in 90 days by default. If your code expires before you complete
+setup, request a fresh one from the same endpoint.
+
+---
+
+## Dry Run — Testing Without Hardware
+
+You can run the full dashboard, browse the object catalogue, edit config,
+and test cloud connectivity without a physical Seestar attached. Set these
+four flags in `config.yaml` before starting:
+
+```yaml
+cloud:
+  enabled: false
+
+image_watcher:
+  enabled: false
+
+photometry:
+  enabled: false
+
+aavso:
+  dry_run: true
+```
+
+Then start with `python3 main.py`. Everything in the dashboard works —
+object catalog, config editor, log stream, and all API endpoints — except
+hardware control and live FITS processing.
+
+<Tip>
+  Dry-run mode is also useful for validating your AAVSO observer code and
+  submission format before your first live night. Set `aavso.dry_run: true`
+  even with hardware connected to preview exactly what would be POSTed to
+  AAVSO WebObs.
+</Tip>
+
+---
+
+## What Happens Next
+
+After your node is registered and the dashboard shows a green cloud status:
+
+- **Every 60 seconds** — the Node Agent sends a heartbeat to the cloud with
+  your current telescope status, schedule state, and safety readings.
+- **Every 300 seconds** — the plan poller checks for a new `ObservationPlan`
+  from the cloud scheduler.
+- **At dark** — if `auto_run_plans` is `true`, the Node Agent begins slewing
+  to targets automatically, capturing frames, and running photometry.
+- **After each frame** — the photometry pipeline plate-solves the FITS,
+  measures differential magnitudes against AAVSO/Gaia comparison stars, and
+  submits the result to AAVSO under your observer code.
+
+For detailed OS-specific installation instructions, service management, and
+sleep prevention configuration, continue to [Installation](/node-setup/installation).
+
+For a complete reference of every `config.yaml` option, see
+[Configuration](/node-setup/configuration).

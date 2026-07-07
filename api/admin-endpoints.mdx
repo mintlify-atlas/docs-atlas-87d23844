@@ -1,0 +1,532 @@
+---
+title: "Admin API Endpoints: Scheduling, Codes, and Tuning"
+sidebarTitle: "Admin Endpoints"
+description: "Admin-only REST endpoints protected by X-Admin-Key — trigger ingestion and replanning, generate activation codes in bulk, broadcast interrupts, and manage scoring weight history."
+---
+
+Admin endpoints give operators direct control over the scheduling pipeline, node onboarding, and science configuration. They are protected by a single shared `X-Admin-Key` header configured in `cloud/config.yaml`. These endpoints are not intended for node agents or member apps — they are designed for cron jobs, deployment scripts, and manual operator intervention. All of them require the admin key to be present and correct on every call; there is no admin session or token.
+
+<Warning>
+Always change `server.admin_key` in `cloud/config.yaml` from any default value before deploying to a public network. Admin endpoints have no rate limiting and grant full control over ingestion, scheduling, activation code issuance, and scoring weights. Treat the admin key with the same care as a root database password.
+</Warning>
+
+---
+
+## POST /api/v1/admin/ingest
+
+Trigger alert ingestion from all configured broker sources followed immediately by a full rescoring pass. This is normally called on a cron schedule, but can be triggered manually to pick up a breaking transient alert outside the regular cadence.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** `X-Admin-Key`
+
+    No request body required.
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    The response mirrors the `alerts.ingest_all()` return value, which includes per-source ingestion counts.
+
+    <ResponseField name="targets_ingested" type="integer">Total new targets added or updated across all broker sources.</ResponseField>
+    <ResponseField name="sources" type="object">Per-source breakdown of ingestion results.</ResponseField>
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl -X POST \
+         -H "X-Admin-Key: your-admin-key" \
+         https://api.thetelescope.net/api/v1/admin/ingest
+    ```
+
+    ```json
+    {
+      "targets_ingested": 12,
+      "sources": {
+        "alerce": {"new": 8, "updated": 3},
+        "gaia_alerts": {"new": 1, "updated": 0}
+      }
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## POST /api/v1/admin/replan
+
+Trigger a full network rescore followed by fresh observation plan generation for all active nodes. Use after changing scoring weights, adding new targets, or whenever you want plans to reflect the current network state immediately rather than waiting for the scheduled nightly run.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** `X-Admin-Key`
+
+    No request body required.
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="scored_pairs" type="integer">Total (target, node) pairs rescored.</ResponseField>
+    <ResponseField name="plans_generated" type="integer">Number of fresh observation plans generated across the network.</ResponseField>
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl -X POST \
+         -H "X-Admin-Key: your-admin-key" \
+         https://api.thetelescope.net/api/v1/admin/replan
+    ```
+
+    ```json
+    {
+      "scored_pairs": 1316,
+      "plans_generated": 28
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## POST /api/v1/admin/activation-codes
+
+Generate one or more activation codes in bulk. Codes are written to the database immediately and can be distributed to new members or embedded in installer packages. Optionally link generated codes to a specific member account.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** `X-Admin-Key`
+
+    <ParamField body="count" type="integer">
+      Number of codes to generate. Range 1–100. Default `1`.
+    </ParamField>
+
+    <ParamField body="expires_days" type="integer">
+      Number of days until the codes expire. Default `90`.
+    </ParamField>
+
+    <ParamField body="user_id" type="string">
+      Optional. Link all generated codes to a specific member account (e.g. `"u_4a8b1c2d"`). When a code linked to an account is used at registration, the node is automatically added to that member's node list.
+    </ParamField>
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="codes" type="array">
+      Array of generated activation code strings in `BS-YYYY-XXXXXXXX` format.
+    </ResponseField>
+
+    <ResponseField name="expires_at" type="string">
+      ISO 8601 UTC expiry timestamp shared by all generated codes.
+    </ResponseField>
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl -X POST \
+         -H "X-Admin-Key: your-admin-key" \
+         -H "Content-Type: application/json" \
+         -d '{"count": 5, "expires_days": 60}' \
+         https://api.thetelescope.net/api/v1/admin/activation-codes
+    ```
+
+    ```json
+    {
+      "codes": [
+        "BS-2026-A1B2C3D4",
+        "BS-2026-E5F6G7H8",
+        "BS-2026-I9J0K1L2",
+        "BS-2026-M3N4O5P6",
+        "BS-2026-Q7R8S9T0"
+      ],
+      "expires_at": "2026-08-14T14:22:00.000000+00:00"
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## POST /api/v1/interrupts
+
+Broadcast a high-priority target interrupt to nodes. The server selects eligible nodes based on their current observability score for the target (requiring a minimum score of 0.35 by default) unless an explicit node list is provided. Nodes poll `GET /api/v1/interrupts` regularly and will see the interrupt on their next poll cycle.
+
+<Note>
+This endpoint uses `X-Admin-Key` authentication rather than node or member credentials. It shares the `/api/v1/interrupts` path with the node's `GET` poll endpoint — the method determines which handler is invoked.
+</Note>
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** `X-Admin-Key`
+
+    <ParamField body="name" type="string" required>
+      Target name, e.g. `"SN2026abc"`.
+    </ParamField>
+
+    <ParamField body="ra_deg" type="float" required>
+      Right ascension in decimal degrees.
+    </ParamField>
+
+    <ParamField body="dec_deg" type="float" required>
+      Declination in decimal degrees.
+    </ParamField>
+
+    <ParamField body="mag" type="float">
+      Estimated target magnitude. Used for exposure time planning on the node.
+    </ParamField>
+
+    <ParamField body="reason" type="string">
+      Human-readable reason for the interrupt, e.g. `"Type Ia SN candidate — early follow-up"`.
+    </ParamField>
+
+    <ParamField body="expires_hours" type="float">
+      Interrupt lifetime in hours. Default `12.0`. Nodes that have not acted before expiry will not see the interrupt on subsequent polls.
+    </ParamField>
+
+    <ParamField body="node_ids" type="array">
+      Optional list of specific node IDs to target. When omitted and `escalate` is `true`, the server automatically selects eligible nodes by observability score.
+    </ParamField>
+
+    <ParamField body="escalate" type="boolean">
+      When `true` (default) and no `node_ids` are given, automatically select up to 50 nodes with score ≥ `min_score` for the target.
+    </ParamField>
+
+    <ParamField body="min_score" type="float">
+      Minimum composite score threshold for automatic node selection. Default `0.35`.
+    </ParamField>
+
+    <ParamField body="replan" type="boolean">
+      When `true`, immediately regenerate observation plans for all notified nodes so the interrupt target appears in tonight's schedule without waiting for the next plan cycle.
+    </ParamField>
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="ok" type="boolean">`true` when the interrupt is recorded.</ResponseField>
+    <ResponseField name="id" type="integer">Database ID of the created interrupt.</ResponseField>
+    <ResponseField name="node_ids" type="array">List of node IDs that will see this interrupt. Empty array when the interrupt is broadcast to all nodes.</ResponseField>
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl -X POST \
+         -H "X-Admin-Key: your-admin-key" \
+         -H "Content-Type: application/json" \
+         -d '{
+           "name": "SN2026abc",
+           "ra_deg": 210.5,
+           "dec_deg": 54.3,
+           "mag": 14.2,
+           "reason": "Type Ia SN candidate — early-phase follow-up requested",
+           "expires_hours": 24,
+           "escalate": true,
+           "replan": true
+         }' \
+         https://api.thetelescope.net/api/v1/interrupts
+    ```
+
+    ```json
+    {
+      "ok": true,
+      "id": 42,
+      "node_ids": [
+        "node_a3f9b2c1",
+        "node_b7e2d4f0",
+        "node_c1a9e3b5"
+      ]
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## GET /api/v1/admin/tuning
+
+Retrieve the currently active observability scoring weights and the last 20 entries from the weight audit log. Use this to inspect what the CHORUS scheduler is using and to understand the history of any automated or manual weight adjustments.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** `X-Admin-Key`
+
+    No request body or query parameters.
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="active_weights" type="object">
+      The scoring weights currently applied to every (target, node) score computation. Keys correspond to the six observability factors.
+
+      <Expandable title="Weight fields">
+        <ResponseField name="active_weights.light_pollution" type="float">Weight for sky darkness factor.</ResponseField>
+        <ResponseField name="active_weights.weather" type="float">Weight for cloud cover and transparency forecast.</ResponseField>
+        <ResponseField name="active_weights.moon" type="float">Weight for lunar interference penalty.</ResponseField>
+        <ResponseField name="active_weights.airmass" type="float">Weight for target altitude / airmass.</ResponseField>
+        <ResponseField name="active_weights.window" type="float">Weight for the available observing window length.</ResponseField>
+        <ResponseField name="active_weights.telescope" type="float">Weight for node hardware capability and reliability score.</ResponseField>
+      </Expandable>
+    </ResponseField>
+
+    <ResponseField name="history" type="array">
+      Up to 20 most recent weight change records from the `weight_history` audit table, newest first.
+
+      <Expandable title="History record fields">
+        <ResponseField name="id" type="integer">History row ID. Use with `POST /api/v1/admin/tuning/rollback` to target a specific weight set.</ResponseField>
+        <ResponseField name="changed_at" type="string">ISO 8601 UTC timestamp of the change.</ResponseField>
+        <ResponseField name="old_weights" type="object">Weight values before the change.</ResponseField>
+        <ResponseField name="new_weights" type="object">Weight values after the change.</ResponseField>
+        <ResponseField name="rationale" type="string">Human or model-generated explanation of why the weights were changed.</ResponseField>
+        <ResponseField name="model" type="string">Identifier of the auto-tuner model that made the change, if automated.</ResponseField>
+        <ResponseField name="applied" type="boolean">`true` when the weights in this record were actually pushed to the live config.</ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl -H "X-Admin-Key: your-admin-key" \
+         https://api.thetelescope.net/api/v1/admin/tuning
+    ```
+
+    ```json
+    {
+      "active_weights": {
+        "light_pollution": 0.20,
+        "weather": 0.25,
+        "moon": 0.15,
+        "airmass": 0.15,
+        "window": 0.15,
+        "telescope": 0.10
+      },
+      "history": [
+        {
+          "id": 7,
+          "changed_at": "2026-06-15T02:30:00.000000+00:00",
+          "old_weights": {
+            "light_pollution": 0.18,
+            "weather": 0.27,
+            "moon": 0.15,
+            "airmass": 0.15,
+            "window": 0.15,
+            "telescope": 0.10
+          },
+          "new_weights": {
+            "light_pollution": 0.20,
+            "weather": 0.25,
+            "moon": 0.15,
+            "airmass": 0.15,
+            "window": 0.15,
+            "telescope": 0.10
+          },
+          "rationale": "Increased light_pollution weight — recent AAVSO feedback shows submissions from darker sites have better acceptance rates",
+          "model": "chorus_tuner_v2",
+          "applied": true
+        }
+      ]
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## POST /api/v1/admin/tuning/rollback
+
+Restore the previous scoring weights from the audit log. This is the manual safety valve for cases where an automated tuning run produced unexpected results — for example, over-weighting weather during a period of unusual cloud cover that caused historically dark sites to be under-scheduled.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** `X-Admin-Key`
+
+    No request body required. The server automatically uses the most recent `old_weights` entry from the `weight_history` table.
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="restored_weights" type="object">
+      The weight set now active after the rollback. Same structure as `active_weights` in the tuning GET response.
+    </ResponseField>
+
+    **404** is returned when there is no tuning history to roll back to.
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl -X POST \
+         -H "X-Admin-Key: your-admin-key" \
+         https://api.thetelescope.net/api/v1/admin/tuning/rollback
+    ```
+
+    ```json
+    {
+      "restored_weights": {
+        "light_pollution": 0.18,
+        "weather": 0.27,
+        "moon": 0.15,
+        "airmass": 0.15,
+        "window": 0.15,
+        "telescope": 0.10
+      }
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## GET /api/v1/admin/sky-quality
+
+Retrieve measured sky brightness statistics per node for a rolling time window, derived from actual `sky_mag` values uploaded with photometry measurements. Useful for detecting cloud, smoke, or lunar contamination that the node's declared `light_pollution_mpsas` does not capture.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** `X-Admin-Key`
+
+    <ParamField query="days" type="float">
+      Look-back window in days. Default `30`.
+    </ParamField>
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="days" type="float">The look-back window used.</ResponseField>
+    <ResponseField name="nodes" type="array">
+      Per-node sky quality summary, sorted by `mean_sky_mag` descending (darkest first).
+
+      <Expandable title="Node sky quality fields">
+        <ResponseField name="node_id" type="string">Node identifier.</ResponseField>
+        <ResponseField name="city" type="string">Node city.</ResponseField>
+        <ResponseField name="declared_mpsas" type="float">Static light pollution value from node registration.</ResponseField>
+        <ResponseField name="n_frames" type="integer">Number of frames with valid `sky_mag` measurements in the window.</ResponseField>
+        <ResponseField name="mean_sky_mag" type="float">Mean measured sky brightness (mpsas).</ResponseField>
+        <ResponseField name="best_sky_mag" type="float">Darkest recorded sky brightness.</ResponseField>
+        <ResponseField name="worst_sky_mag" type="float">Brightest (most polluted) sky brightness recorded.</ResponseField>
+        <ResponseField name="last_seen" type="string">Timestamp of most recent measurement in the window.</ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl -H "X-Admin-Key: your-admin-key" \
+         "https://api.thetelescope.net/api/v1/admin/sky-quality?days=7"
+    ```
+
+    ```json
+    {
+      "days": 7.0,
+      "nodes": [
+        {
+          "node_id": "node_a3f9b2c1",
+          "city": "Austin",
+          "declared_mpsas": 18.9,
+          "n_frames": 412,
+          "mean_sky_mag": 18.72,
+          "best_sky_mag": 19.31,
+          "worst_sky_mag": 17.04,
+          "last_seen": "2026-06-15T03:05:00.000000+00:00"
+        }
+      ]
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## GET /api/v1/admin/incidents
+
+List structured reliability incidents reported by nodes and the cloud pipeline. Incidents are automatically created for hardware faults, photometry quality failures, emergency parks, and cross-validation outlier clusters.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** `X-Admin-Key`
+
+    <ParamField query="status" type="string">
+      Filter by incident status. Options: `"active"` (open + investigating, default), `"resolved"`, `"all"`.
+    </ParamField>
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="incidents" type="array">Array of incident records from the `incidents` table.</ResponseField>
+    <ResponseField name="count" type="integer">Number of records returned.</ResponseField>
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl -H "X-Admin-Key: your-admin-key" \
+         "https://api.thetelescope.net/api/v1/admin/incidents?status=active"
+    ```
+
+    ```json
+    {
+      "count": 2,
+      "incidents": [
+        {
+          "id": 101,
+          "node_id": "node_b7e2d4f0",
+          "status": "open",
+          "incident_type": "outlier_cluster",
+          "severity": "warning",
+          "opened_at": "2026-06-15T01:00:00.000000+00:00"
+        }
+      ]
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## PATCH /api/v1/admin/incidents/{incident_id}
+
+Update a structured incident's status, root cause, resolution note, or resolver. Setting `status` to `"resolved"` automatically stamps `resolved_at` if not already set.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** `X-Admin-Key`
+
+    <ParamField path="incident_id" type="integer" required>Incident ID from the incidents list.</ParamField>
+
+    <ParamField body="status" type="string">
+      New status: `"open"`, `"investigating"`, or `"resolved"`.
+    </ParamField>
+
+    <ParamField body="root_cause" type="string">
+      Root cause classification: `"weather"`, `"hardware"`, `"software"`, `"optics"`, or `"unknown"`.
+    </ParamField>
+
+    <ParamField body="resolution_note" type="string">
+      Free-text description of what was found and how it was fixed.
+    </ParamField>
+
+    <ParamField body="resolver" type="string">
+      Name or email of the person resolving the incident.
+    </ParamField>
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="incident" type="object">The full updated incident record.</ResponseField>
+
+    **400** is returned when the body contains no recognised fields.
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl -X PATCH \
+         -H "X-Admin-Key: your-admin-key" \
+         -H "Content-Type: application/json" \
+         -d '{
+           "status": "resolved",
+           "root_cause": "weather",
+           "resolution_note": "Outlier cluster caused by thin cirrus, cleared by 03:00 UTC",
+           "resolver": "ops@thetelescope.net"
+         }' \
+         https://api.thetelescope.net/api/v1/admin/incidents/101
+    ```
+
+    ```json
+    {
+      "incident": {
+        "id": 101,
+        "status": "resolved",
+        "root_cause": "weather",
+        "resolution_note": "Outlier cluster caused by thin cirrus, cleared by 03:00 UTC",
+        "resolver": "ops@thetelescope.net",
+        "resolved_at": "2026-06-15T09:30:00.000000+00:00"
+      }
+    }
+    ```
+  </Tab>
+</Tabs>

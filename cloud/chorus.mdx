@@ -1,0 +1,293 @@
+---
+title: "CHORUS: Information-Theoretic Telescope Scheduling"
+sidebarTitle: "CHORUS"
+description: "CHORUS replaces heuristic composite scoring with a submodular information-gain objective — understanding how it models measurement quality, delivery probability, and scheduling as experiment design."
+---
+
+The classic composite scorer asks: *how good is this (target, node) pairing?* CHORUS — **C**overage-kernel **H**ierarchical **O**ptimization for **R**eliability-weighted **U**tility of **S**amples — asks a different question entirely: **how much scientific information does this observation deliver that the network would not otherwise have?** Every coordination behaviour the network exhibits — redundancy avoidance, cadence shaping, longitude diversity, weather robustness — emerges as arithmetic from this single objective rather than from a set of hand-tuned multipliers.
+
+<Note>
+CHORUS is the default live scheduler. The config key `scheduler.chorus: true` is set out of the box in `cloud/config.yaml`. The former per-node greedy packer is archived under `cloud/archive/` and can be restored instantly by setting `scheduler.chorus: false` — no infrastructure restart required.
+</Note>
+
+<Warning>
+The hot path — T0 through T3 and Ring 0 — is 100% procedural and deterministic. No LLM calls occur during alert ingestion, composite scoring, or plan generation. Claude is used only in the Ring-1 advisory monitor (the same nightly weight-tuning loop described in [Configuration](/cloud/configuration)), which is opt-in and ships disabled.
+</Warning>
+
+## What CHORUS Replaces
+
+| Legacy hand-tuned mechanism | CHORUS emergent equivalent |
+|-----------------------------|---------------------------|
+| `redundancy_decay = 0.55` geometric penalty | A second observation of an already-captured cell multiplies a residual that is already small — automatic diminishing returns, scaled by how likely the first observation was to succeed |
+| Longitude-diversity recovery (`× sep/90° × 0.5`) | Observations at different longitudes touch different time cells → full marginal value, no recovery hack needed |
+| `cadence_bonus_strength` | Time cells at cadence resolution: clustered samples hit the same cell, spread samples hit empty ones |
+| `robustness_cloud_relax` for enclosure nodes | Enclosure/dew-heater raise `p_exec` (measured, not declared) — robust nodes win marginal-value ties in bad weather automatically |
+| Trust multiplier `×(0.5 + 0.5 × trust)` | Reliability enters *where it physically acts*: p (data may not arrive), κ (data may be noisier than physics predicts), θ_out (data may be discarded) |
+| `telescope_match` heuristic (+0.1 for wide field) | σ² model: FoV sets the comparison-star ensemble floor; aperture/cooling set the faint-end noise; the cooled scope wins faint targets because its information gain is 100× larger, not because a rule says so |
+
+## Three First-Class Models
+
+CHORUS is built on three models that replace the composite score's individual heuristics:
+
+<CardGroup cols={3}>
+  <Card title="Measurement Model" icon="telescope">
+    Per (node, target, time, exposure) predicted photometric variance σ², computed from the telescope's actual optics, sensor, cooling, filter set, field of view, and sky background.
+  </Card>
+  <Card title="Delivery Model" icon="satellite">
+    Per-observation probability that data actually arrives and is accepted: p_o = p_sky × p_exec × p_accept, each factor maintained as a calibrated posterior.
+  </Card>
+  <Card title="Information Model" icon="chart-line">
+    Each target owns a set of information cells — time bins, phase bins, event sub-windows, filter bands — with science value densities and precision requirements.
+  </Card>
+</CardGroup>
+
+## Information Cells
+
+Each active target *t* owns a finite set of **information cells** U\_t = \{u₁ … u\_m\}. A cell is the atomic "thing worth knowing", characterised by three quantities:
+
+- **Locus** x_u — a time interval, phase interval (for periodic targets), event sub-window (ingress/egress/mid for transits), and optionally a filter band
+- **Value density** ν_u ≥ 0 — the science utility of fully capturing this cell, set by the class template and modulated by campaign state and scarcity
+- **Precision requirement** σ_ref(u) — the photometric error at which the cell's science is essentially achieved (e.g. 0.01 mag to resolve a 12 ppt transit; 0.1 mag to detect a CV outburst)
+
+Cells replace the composite score's coverage, cadence, time-criticality, and science terms simultaneously. A target's total schedulable value tonight is Σ ν_u, and its cell structure encodes *when* and *how precisely* it needs observing.
+
+## Capture Coefficients
+
+A candidate observation *o* (node n, start slot s, exposure plan e) captures a fraction of each cell it touches:
+
+```
+ρ(u, o) = g(σ_o, u) · k_t(x_u, x_o)     ∈ [0, 1]
+
+g(σ, u)  = σ_ref(u)² / (σ_ref(u)² + σ²)     precision saturation
+k_t(·,·)  = class-specific proximity kernel    temporal / phase locality
+```
+
+**`g`** is the exact Gaussian posterior variance reduction for a one-dimensional cell state with prior variance σ_ref². A measurement at σ = σ_ref captures 50%; at σ_ref/3 captures 90%; at 3σ_ref, only 10%. This is where telescope hardware differentiates continuously — a 200 mm cooled Newtonian at mag 16.5 might predict σ = 0.008 where a Seestar predicts σ = 0.25, giving capture coefficients of 0.975 versus 0.038 — a 25× value ratio.
+
+**`k_t`** is 1 when the observation sits inside the cell's locus and decays with distance in time (aperiodic classes) or phase (periodic classes), with class-tuned length scales that are Ring-1 hyperparameters.
+
+## Delivery Probability
+
+Each candidate observation succeeds — produces an accepted measurement — with probability:
+
+```
+p_o = p_sky(n, s..s+need)     calibrated per-slot clear probability
+    × p_exec(n)               node executes and delivers, given clear sky
+    × p_accept(n)             delivered data passes QC / AAVSO / cross-validation
+```
+
+`p_exec` and `p_accept` are posterior means of per-node Beta distributions maintained by the reliability ledger. Conditional on success, the measurement's effective variance is the physics prediction inflated by the node's measured efficiency:
+
+```
+σ_o² = κ_n · σ_phys²(n, t, s, e)
+```
+
+κ_n is the hardware-normalised skill factor — the ratio of delivered uncertainty to physics-predicted uncertainty, shrunk toward 1. A Seestar running at its limit has κ ≈ 1.05 (trust its σ); a scope with collimation problems has κ ≈ 6 (its 0.01 predictions behave like 0.025 in practice).
+
+## The Network Objective
+
+Let A be the set of placed observations. Define per cell the **residual** — the probability-weighted fraction of the cell's value still uncaptured:
+
+```
+r_u(A) = Π_{o ∈ A_t(u)} (1 − p_o · ρ(u, o))
+```
+
+The network objective is expected captured value plus an exploration bonus:
+
+```
+Φ(A) = Σ_t Σ_{u ∈ U_t} ν_u · (1 − r_u(A))   +   β · Σ_{o ∈ A} ξ(o)
+```
+
+The expectation over independent Bernoulli success indicators is exact and closed-form because of the product structure — no sampling, no simulation, fully deterministic.
+
+**Theorem:** Each term ν_u · (1 − Π(1 − p_o ρ_{u,o})) is a monotone submodular function of A. Therefore Φ is monotone submodular, and greedy maximization subject to the interval-scheduling and per-node capacity constraints inherits the classical near-optimality guarantees of submodular maximization over independence systems.
+
+## The Unified Scheduling Equation
+
+The marginal value of a placement — the quantity the solver ranks at every step — is:
+
+```
+Δ(o | A) = Σ_{u touched by o} ν_u · r_u(A) · p_o · ρ(u, o)   +   β · ξ(o)
+```
+
+Read each term aloud and every current mechanism falls out:
+
+- **ν_u** — science value, urgency, brightness feasibility (via ρ → g)
+- **r_u(A)** — what is left: redundancy, cadence, diversity — all through the residual
+- **p_o** — weather, node reliability — the chance it actually happens
+- **ρ(u, o)** — how well this hardware captures this cell
+
+One formula. No weight vector.
+
+## Scarcity Pricing
+
+The composite score's `coverage_gap` and `time_criticality` look backward (how neglected is it? how old is the alert?). CHORUS prices cells *forward*:
+
+```
+ν_u = ν_u^raw · S_u,     S_u = 1 / (1 + Σ_{d=1..H} γ^d · q_u(d))
+```
+
+q_u(d) is the probability the network could capture cell u on future night d — computed once per target per day by a deterministic sweep over visibility and climatological clear probability. γ ∈ (0, 1) is the horizon discount (default 0.93). H ≈ 45 nights.
+
+Consequences without special-casing:
+- A transit whose next visible event is in 43 days gets S ≈ 1 → full value tonight
+- A circumpolar LPV with 90 future chances gets S small → it competes fairly and becomes natural filler for new nodes
+- A target approaching solar conjunction automatically increases in value as q_u(d) collapses
+- Fresh transients get urgency from ν^raw set by the class template, not an age-decay curve
+
+## Node Reliability Vector
+
+CHORUS maintains four conjugate posteriors per node, updated nightly by counting — no optimizer, no LLM:
+
+```
+p_exec   ~ Beta(a_e, b_e)    success = plan item attempted on a clear night → data delivered
+p_accept ~ Beta(a_a, b_a)    success = delivered → aavso_submitted, non-outlier, good/acceptable
+θ_out    ~ Beta(a_o, b_o)    cross-validation outlier rate
+κ        ~ shrunk ratio       mean((σ_delivered / σ_phys_predicted)²) over recent accepted
+                              measurements, shrunk toward 1 with m₀ = 8
+```
+
+Priors are Beta(3,3)-class — the principled form of "start at 0.5" — and every count decays with a ~60-night half-life so nodes can redeem themselves and regressions surface quickly.
+
+The legacy `reliability_score` and `scheduler_trust_score` columns are still written (a fixed monotone map of the posterior vector) so every existing UI, API, and member-app surface keeps working — but the planner never reads the scalar again.
+
+**Why κ is the deep upgrade:** today's `precision_factor = 1 − mean_unc/0.30` punishes small telescopes for physics and forgives large ones for sloppiness. κ compares each node to its *own* physics prediction. A Seestar running at its limit (κ ≈ 1.05) is treated as fully reliable; a C8 with collimation problems (κ ≈ 6) has its 0.01 mag predictions silently treated as 0.025 and loses the demanding faint-target assignments it cannot actually deliver.
+
+## Four Execution Tiers
+
+CHORUS runs through four deterministic tiers on every planning cycle:
+
+<Tabs>
+  <Tab title="T0 LEDGER">
+    **Continuous + nightly** — state update from evidence.
+
+    Inputs: new measurements, incidents, AAVSO results, weather realizations.
+
+    - `chorus_node_ledger`: Beta posterior counts for p_exec / p_accept / θ_out, κ ratio stats, per-site weather calibration (a, b), per-band extinction k_ext, monthly climatology
+    - `chorus_target_state`: per-target cross-night residuals — EB phase-coverage vectors, CV hazard clocks, transient segment tracking, last-accepted-σ per band
+    - Weather site calibration: logistic(a + b · logit(forecast_clear)) fit per site by counting realized outcomes — coastal nodes with chronically optimistic forecasts get honest probabilities within two weeks
+    - Incident classifier provides attribution (weather failure → excluded from p_exec; collimation problem → added to κ) so reliability signals are not polluted by causes outside the node's control
+  </Tab>
+  <Tab title="T1 HORIZON">
+    **Daily, per target** — scarcity sweep and cell compilation.
+
+    For each active target, a deterministic sweep over the next H = 45 nights × capable nodes: analytic visibility, climatological p_sky, p_exec → q_u(d) → scarcity S_u. Then compile the class template + target_state into tonight's cell list U_t with final ν_u and σ_ref(u). Cached in `target_cells`.
+
+    This tier is also where **campaign commitments** live: a multi-night campaign is a set of pre-priced future cells. T1 raises tonight's ν for cells whose future q is low given the campaign deadline — no separate campaign scheduler needed.
+  </Tab>
+  <Tab title="T2 SCORE">
+    **Per planning cycle** — fleet-wide stochastic-coverage assignment.
+
+    **Opportunity generation** (per node, parallel): dark window, alt/az curve, horizon mask, per-slot p_sky, per-slot σ_phys for each (target, exposure-candidate), feasibility (bright limit).
+
+    **Lazy cost-benefit greedy on Φ:**
+
+    ```python
+    # 1. Prime a max-heap with optimistic Δ̂(o) for every opportunity
+    # 2. Pop o; recompute Δ(o | A) exactly against current residuals r_u
+    #    O(#cells touched); if still ≥ next heap key → commit (lazy = exact
+    #    under submodularity); update r_u ledgers, node occupancy, capacity
+    # 3. Stop when Δ_best < ε or occupancy/capacity exhausted
+    # 4. Seeded deterministic local search (same budget as today's annealing):
+    #    relocate / swap / drop-add moves accepted on exact Φ recomputation
+    ```
+
+    Compatibility: for every (target, node) the best single-placement Δ normalised to 0–1 is written to `scores.total` with a component breakdown — so every existing scores-reading surface keeps functioning.
+  </Tab>
+  <Tab title="T3 PERFORM">
+    **Per node** — sequencing + contingency ladders → `ObservationPlan`.
+
+    Sequencing keeps the current machinery — nearest-neighbour + 2-opt ordering, slew/filter/meridian-flip overhead model — with overhead now charged back into marginal values so badly-packed orderings are repaired by the local search.
+
+    **Contingency ladders (new):** for each plan item, up to 2 alternates — the next-best placements from the same solved state tagged with trigger conditions ("if sky closed until slot s", "if target unsolvable"). A late-start ladder precomputes the best truncated plan if observing begins at +1h, +2h, or +3h. Emitted inside the existing plan JSON as an additive `contingencies` object — old node agents ignore unknown keys.
+
+    **Incremental repair:** alerts, a node dropping offline, or a hard forecast change do not trigger a full re-solve. Affected placements are removed, their r_u restored, and the greedy resumes from the heap — O(affected), retaining the near-optimality guarantee relative to surviving commitments.
+  </Tab>
+</Tabs>
+
+## Class Strategy Templates
+
+Templates are **declarative data** — rows in `class_templates`, seeded from config, editable by Ring 2 with schema validation. The deterministic cell compiler reads them. Adding a science programme equals adding a template row.
+
+| Class | Cell structure |
+|-------|---------------|
+| **EB (eclipsing binaries)** | 32 phase bins from the ephemeris. ν^raw concentrated on primary/secondary eclipse bins (σ_ref 0.02–0.03), quadrature for the O'Connell effect, uniform low floor elsewhere. Phase ledger persists across nights — bins captured this season stay discounted. CHORUS sees zero marginal value sampling the same phase twice; it shifts to a node 90° west instead |
+| **EXOPLANET (transits)** | Event sub-window cells: pre-ingress baseline (≥ 45 min), ingress, mid, egress, post-egress baseline. ν^raw ∝ depth-normalised timing value × scarcity. Partial coverage by different nodes composes correctly — node A takes ingress + mid, node B (300 km east) takes egress |
+| **CV (cataclysmic variables)** | Quiescent: one detection-quality cell per hazard interval, ν^raw ∝ P(state change since last sample) = 1 − e^(−λ_cv · Δt). Outburst state: template swaps automatically to dense time cells with tight σ_ref — an automatic campaign escalation that fires before the next planning cycle |
+| **SN / transient** | Time + band cells. Early cells (rise/peak/early decline) carry ν^raw far above late-decline cells — age enters through which cells still exist, not an exp(−age/12) fudge. Band-specific cells exist only when a filtered node is in the fleet; that node alone sees ρ > 0 on colour cells |
+| **LPV / Mira** | Sparse time cells, wide σ_ref, huge future opportunity count → tiny S_u. The network's ballast and nursery for new nodes |
+
+## Three-Ring Tuning
+
+The tuning system is elevated from "Claude nudges 30 weights" to a three-ring loop around a deterministic core:
+
+<Tabs>
+  <Tab title="Ring 0">
+    **Closed-form calibration — nightly, LLM-free.**
+
+    Everything that has a statistical estimator gets one and stops being an LLM knob:
+
+    - Per-site forecast calibration (a, b) from logistic regression on forecast vs. realized outcomes
+    - Per-node κ from shrinkage estimation over accepted measurements
+    - Per-node/band extinction and zero-point drift
+    - Class hazard rates λ for CV outburst probability
+    - Monthly climatology tables
+
+    Pure counting/least-squares in T0. Deterministic, auditable, no trust region needed beyond sample-size gates. Today the Claude monitor spends delta budget nudging `weather` weights to compensate for miscalibrated forecasts — Ring 0 removes that error term at the source.
+  </Tab>
+  <Tab title="Ring 1">
+    **LLM-advised hyperparameters — nightly, evolved from today's loop.**
+
+    The parameter surface shrinks from ~31 heuristic weights to ~15 genuinely judgment-shaped hyperparameters:
+
+    ```
+    kernel_time_scale_h / kernel_phase_scale   sample locality per class
+    value_scale_* (EB, CV, transient, …)       relative programme priorities
+    scarcity_gamma, scarcity_horizon_nights    tonight vs the future
+    exploration_beta, w_e / w_a / w_κ         fleet-learning appetite
+    same_site_repeat_factor                    weather-redundancy conservatism
+    min_marginal, max_obs_per_target           breadth vs depth
+    ```
+
+    Same `tuning_state` / `weight_history` machinery, same trust-region clamps, same admin notifications and rollback API.
+
+    **The decisive change — backtest gate:** because the planner is deterministic and every night's opportunity inputs are archived in `chorus_run_archive`, any proposed θ′ is replayed over the last 14 nights' *actual* inputs, and the resulting plans are scored against *realized* outcomes. θ′ is applied only if backtested realized Φ ≥ current θ's. The LLM proposes; arithmetic disposes.
+  </Tab>
+  <Tab title="Ring 2">
+    **Structural evolution — weekly, LLM-advised, bounded.**
+
+    Claude may propose new declarative artifacts: a class template revision, a new exposure-candidate family, a campaign definition. All are:
+
+    - Expressed as data validated against schemas
+    - Backtested identically to Ring 1
+    - Trust-staged: advisory → shadow-scored → live
+    - Reversible via the same audit table
+
+    The deterministic core never changes shape; its vocabulary grows. Adding a new science programme is a template row, not a code change.
+  </Tab>
+</Tabs>
+
+## Module Structure
+
+```
+cloud/chorus/
+├── params.py       Ring-1 hyperparameters (DEFAULTS, BOUNDS, merged())
+├── physics.py      Measurement model: sigma_phys per (node, target, slot, exposure)
+├── cells.py        Cell templates, compiler, proximity kernels
+├── horizon.py      T1 scarcity sweep per target
+├── assign.py       T2 lazy submodular greedy + seeded local search
+├── perform.py      T3 sequencing + contingency ladders
+├── ledger.py       T0 reliability vectors, target state, Ring-0 calibration
+├── planner.py      Orchestration: plan_network(), plan_single_node(), plan_shadow()
+└── backtest.py     Ring-1 backtest gate and run archive
+```
+
+`planner.plan_network()` is the entry point called by `scheduler.generate_all_plans()` when `scheduler.chorus: true`. `plan_shadow()` runs the full pipeline and records telemetry without saving plans — the staged rollout path before flipping the flag live.
+
+## Guarantees and Budgets
+
+- **Determinism:** same DB rows, cached forecasts, and seed → same plans. All randomness is the seeded local-search RNG. No LLM anywhere in T0–T3 or Ring 0
+- **Complexity:** cells/target ≤ 64; opportunities ≈ nodes × 60 (unchanged query shape); marginal evaluation O(cells touched) with the residual ledger; lazy greedy ≈ O(N_opp log N_opp) pops in practice; T1 sweep O(targets × 45 × nodes) of trig, daily — comfortably inside the current planning cadence at 10³ nodes × 10³ targets
+- **Approximation quality:** Φ is monotone submodular → lazy greedy is exact greedy; near-optimality per submodular-maximization theory; the seeded local search only improves, never regresses
+- **Cold starts:** unknown specs → Seestar-anchored defaults; no forecast → site climatology; new target class → generic time-cell template; empty ledger → Beta(3,3)/κ = 1 priors — every fallback is the current system's behaviour or better
+- **Compatibility:** `ObservationPlan`/`PlanItem` unchanged (additive `contingencies`, richer `explanation`); `scores` still written; legacy reliability columns mirrored; `tuning_state`/`weight_history` reused; `plan_runs` extended

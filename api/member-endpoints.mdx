@@ -1,0 +1,670 @@
+---
+title: "Member API Endpoints: Profile, Nodes, and Observations"
+sidebarTitle: "Member Endpoints"
+description: "REST endpoints for authenticated members — account management, node registration, observation history, cumulative stats, night summaries, and notification preferences."
+---
+
+Member endpoints power the dashboard and mobile app experience. They cover the full lifecycle of a member's relationship with The Telescope Net: creating an account, linking telescope nodes, generating activation codes for first-boot registration, browsing observation history and cumulative statistics, managing node schedules and vacation modes, and controlling notification preferences. All endpoints except registration and login require an `Authorization: Bearer <token>` header obtained at login.
+
+---
+
+## POST /api/v1/auth/register
+
+Create a new member account. Returns a bearer token immediately so the client does not need a separate login step.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** None
+
+    <ParamField body="email" type="string" required>
+      Valid email address. Must contain `@` and a dot in the domain. Stored in lowercase. Returns `400` if the address is already registered.
+    </ParamField>
+
+    <ParamField body="password" type="string" required>
+      Minimum 8 characters. Hashed server-side with PBKDF2-HMAC-SHA256 at 260,000 iterations with a per-user random salt.
+    </ParamField>
+
+    <ParamField body="display_name" type="string">
+      Optional display name shown in the member dashboard. Defaults to the email prefix if omitted.
+    </ParamField>
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="user_id" type="string">Unique member identifier, e.g. `"u_4a8b1c2d"`.</ResponseField>
+    <ResponseField name="token" type="string">Bearer token. Pass in `Authorization: Bearer <token>` on all subsequent member requests.</ResponseField>
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl -X POST https://api.thetelescope.net/api/v1/auth/register \
+         -H "Content-Type: application/json" \
+         -d '{"email": "you@example.com", "password": "SecurePass123!", "display_name": "Jane"}'
+    ```
+
+    ```json
+    {
+      "user_id": "u_4a8b1c2d",
+      "token": "aBcDeFgHiJkLmNoPqRsTuVwXyZ012345_abc"
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## POST /api/v1/auth/login
+
+Authenticate with email and password. Issues a **new** bearer token, invalidating any previously issued token for this account.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** None
+
+    <ParamField body="email" type="string" required>Registered email address.</ParamField>
+    <ParamField body="password" type="string" required>Account password.</ParamField>
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="user_id" type="string">Member identifier.</ResponseField>
+    <ResponseField name="token" type="string">Fresh bearer token.</ResponseField>
+
+    **400** is returned with a deliberately vague `"invalid email or password"` error for both unknown emails and wrong passwords, to prevent account enumeration.
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl -X POST https://api.thetelescope.net/api/v1/auth/login \
+         -H "Content-Type: application/json" \
+         -d '{"email": "you@example.com", "password": "SecurePass123!"}'
+    ```
+
+    ```json
+    {
+      "user_id": "u_4a8b1c2d",
+      "token": "new_token_here"
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## GET /api/v1/me
+
+Retrieve the authenticated member's profile.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** `Authorization: Bearer <token>`
+
+    No request body or query parameters.
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="user_id" type="string">Member identifier.</ResponseField>
+    <ResponseField name="email" type="string">Registered email address.</ResponseField>
+    <ResponseField name="role" type="string">Account role, typically `"member"`.</ResponseField>
+    <ResponseField name="display_name" type="string">Display name set at registration or updated since.</ResponseField>
+    <ResponseField name="country" type="string">Country stored on the member profile.</ResponseField>
+    <ResponseField name="created_at" type="string">ISO 8601 UTC timestamp of account creation.</ResponseField>
+    <ResponseField name="last_login" type="string">ISO 8601 UTC timestamp of most recent login.</ResponseField>
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl -H "Authorization: Bearer <token>" \
+         https://api.thetelescope.net/api/v1/me
+    ```
+
+    ```json
+    {
+      "user_id": "u_4a8b1c2d",
+      "email": "you@example.com",
+      "role": "member",
+      "display_name": "Jane",
+      "country": "US",
+      "created_at": "2026-01-10T18:30:00.000000+00:00",
+      "last_login": "2026-06-15T01:12:00.000000+00:00"
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## GET /api/v1/me/nodes
+
+List all telescope nodes claimed by the authenticated member.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** `Authorization: Bearer <token>`
+
+    No request body or query parameters.
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="nodes" type="array">
+      Array of node records. Each entry omits `api_key` and `owner_email`.
+
+      <Expandable title="Node fields">
+        <ResponseField name="node_id" type="string">Node identifier.</ResponseField>
+        <ResponseField name="telescope_model" type="string">Model name, e.g. `"ZWO Seestar S50"`.</ResponseField>
+        <ResponseField name="display_name" type="string">Member-set display name for this node.</ResponseField>
+        <ResponseField name="city" type="string">Observatory city.</ResponseField>
+        <ResponseField name="country" type="string">Observatory country.</ResponseField>
+        <ResponseField name="status" type="string">`active`, `sleeping`, `vacation`, or `disabled`.</ResponseField>
+        <ResponseField name="online" type="boolean">Derived: `true` when heartbeat is recent and status is `active`.</ResponseField>
+        <ResponseField name="portable" type="boolean">`true` for telescopes that move between sites.</ResponseField>
+        <ResponseField name="vacation_until" type="string">ISO date string if node is on vacation, otherwise empty.</ResponseField>
+        <ResponseField name="conditions" type="object">Most recently uploaded observing conditions.</ResponseField>
+        <ResponseField name="session_city" type="string">Tonight's session location (portable nodes only).</ResponseField>
+        <ResponseField name="previous_locations" type="array">Up to 10 recent session locations for portable nodes.</ResponseField>
+        <ResponseField name="claimed_at" type="string">ISO 8601 UTC timestamp of when this member claimed the node.</ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl -H "Authorization: Bearer <token>" \
+         https://api.thetelescope.net/api/v1/me/nodes
+    ```
+
+    ```json
+    {
+      "nodes": [
+        {
+          "node_id": "node_a3f9b2c1",
+          "telescope_model": "ZWO Seestar S50",
+          "display_name": "Backyard Seestar",
+          "city": "Austin",
+          "country": "US",
+          "status": "active",
+          "online": true,
+          "portable": false,
+          "claimed_at": "2026-01-15T20:00:00.000000+00:00"
+        }
+      ]
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## POST /api/v1/me/nodes/{node_id}
+
+Claim an existing node by presenting its `api_key`. Use this to link a node that was registered before the member account existed, or to add a second account as a co-owner.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** `Authorization: Bearer <token>`
+
+    <ParamField path="node_id" type="string" required>The node identifier to claim.</ParamField>
+    <ParamField body="api_key" type="string" required>The node's secret API key (from `data/cloud_state.json` on the node).</ParamField>
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="ok" type="boolean">`true` when the claim is recorded.</ResponseField>
+    <ResponseField name="node_id" type="string">The claimed node ID.</ResponseField>
+
+    **401** is returned when the `api_key` does not match the node.
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl -X POST https://api.thetelescope.net/api/v1/me/nodes/node_a3f9b2c1 \
+         -H "Authorization: Bearer <token>" \
+         -H "Content-Type: application/json" \
+         -d '{"api_key": "<the_node_api_key>"}'
+    ```
+
+    ```json
+    {"ok": true, "node_id": "node_a3f9b2c1"}
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## POST /api/v1/me/activation-code
+
+Generate a personal activation code for linking a new node to this account. The code is embedded in the installer flow and is consumed during `POST /api/v1/nodes/register`. Codes expire after **30 days**.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** `Authorization: Bearer <token>`
+
+    <ParamField body="location_name" type="string">
+      Place name for the observatory, e.g. `"Rockwood TX"`. Geocoded via Nominatim and stored with the code so the node automatically receives coordinates at registration.
+    </ParamField>
+
+    <ParamField body="latitude" type="float">
+      Observatory latitude. Takes precedence over `location_name` geocoding when provided together with `longitude`.
+    </ParamField>
+
+    <ParamField body="longitude" type="float">
+      Observatory longitude.
+    </ParamField>
+
+    <ParamField body="telescope_model" type="string">
+      Telescope model chosen in the app, e.g. `"ZWO Seestar S50"`. Used to seed hardware spec defaults at registration.
+    </ParamField>
+
+    <ParamField body="telescope_display_name" type="string">
+      Human-readable name for this specific telescope, max 80 characters.
+    </ParamField>
+
+    <ParamField body="portable" type="boolean">
+      `true` if this will be a portable node.
+    </ParamField>
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="code" type="string">Activation code in `BS-YYYY-XXXXXXXX` format.</ResponseField>
+    <ResponseField name="expires_at" type="string">ISO 8601 UTC expiry timestamp (30 days from generation).</ResponseField>
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl -X POST https://api.thetelescope.net/api/v1/me/activation-code \
+         -H "Authorization: Bearer <token>" \
+         -H "Content-Type: application/json" \
+         -d '{
+           "location_name": "Rockwood TX",
+           "telescope_model": "ZWO Seestar S50",
+           "telescope_display_name": "Back Porch Seestar"
+         }'
+    ```
+
+    ```json
+    {
+      "code": "BS-2026-ABCD1234",
+      "expires_at": "2026-07-15T14:22:00.000000+00:00"
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## GET /api/v1/me/observations
+
+Retrieve photometry measurements uploaded by all nodes owned by this member, most recent first.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** `Authorization: Bearer <token>`
+
+    <ParamField query="days" type="integer">
+      Look-back window in days. Default `90`, maximum `365`.
+    </ParamField>
+
+    <ParamField query="limit" type="integer">
+      Maximum number of rows to return. Default `200`, maximum `100,000`.
+    </ParamField>
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="observations" type="array">
+      Array of measurement records sorted by BJD descending.
+
+      <Expandable title="Observation fields">
+        <ResponseField name="node_id" type="string">Node that made the measurement.</ResponseField>
+        <ResponseField name="target_name" type="string">Target name.</ResponseField>
+        <ResponseField name="bjd" type="float">Barycentric Julian Date.</ResponseField>
+        <ResponseField name="magnitude" type="float">Measured magnitude.</ResponseField>
+        <ResponseField name="uncertainty" type="float">1-σ photometric uncertainty.</ResponseField>
+        <ResponseField name="filter" type="string">Photometric filter used.</ResponseField>
+        <ResponseField name="quality_flag" type="string">`"good"`, `"acceptable"`, or `"poor"`.</ResponseField>
+        <ResponseField name="aavso_submitted" type="integer">`1` when submitted to AAVSO, `0` otherwise.</ResponseField>
+        <ResponseField name="received_at" type="string">ISO 8601 UTC timestamp of cloud receipt.</ResponseField>
+      </Expandable>
+    </ResponseField>
+
+    <ResponseField name="total" type="integer">Number of observations returned.</ResponseField>
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl -H "Authorization: Bearer <token>" \
+         "https://api.thetelescope.net/api/v1/me/observations?days=30&limit=50"
+    ```
+
+    ```json
+    {
+      "observations": [
+        {
+          "node_id": "node_a3f9b2c1",
+          "target_name": "SS_Cyg",
+          "bjd": 2460476.5123,
+          "magnitude": 11.42,
+          "uncertainty": 0.018,
+          "filter": "CV",
+          "quality_flag": "good",
+          "aavso_submitted": 1,
+          "received_at": "2026-06-15T03:10:00.000000+00:00"
+        }
+      ],
+      "total": 1
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## GET /api/v1/me/stats
+
+Retrieve cumulative photometry statistics across all nodes owned by this member.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** `Authorization: Bearer <token>`
+
+    No request body or query parameters.
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="total_observations" type="integer">Total measurements uploaded across all owned nodes.</ResponseField>
+    <ResponseField name="aavso_submitted" type="integer">Measurements submitted to AAVSO WebObs.</ResponseField>
+    <ResponseField name="targets_observed" type="integer">Distinct target names observed.</ResponseField>
+    <ResponseField name="clear_nights" type="integer">Distinct nights where at least one observation was recorded.</ResponseField>
+    <ResponseField name="node_count" type="integer">Number of nodes this member owns.</ResponseField>
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl -H "Authorization: Bearer <token>" \
+         https://api.thetelescope.net/api/v1/me/stats
+    ```
+
+    ```json
+    {
+      "total_observations": 1423,
+      "aavso_submitted": 1287,
+      "targets_observed": 34,
+      "clear_nights": 89,
+      "node_count": 2
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## GET /api/v1/me/nights
+
+Retrieve night-by-night observation summaries for all nodes owned by this member, most recent first.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** `Authorization: Bearer <token>`
+
+    <ParamField query="limit" type="integer">
+      Maximum number of nights to return. Default `30`, maximum `90`.
+    </ParamField>
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="nights" type="array">
+      Array of nightly summary records.
+
+      <Expandable title="Night summary fields">
+        <ResponseField name="node_id" type="string">Node that observed on this night.</ResponseField>
+        <ResponseField name="night" type="string">Local evening date in `YYYY-MM-DD` format.</ResponseField>
+        <ResponseField name="n_targets" type="integer">Number of distinct targets observed.</ResponseField>
+        <ResponseField name="n_observations" type="integer">Total measurements taken.</ResponseField>
+        <ResponseField name="n_submitted" type="integer">Measurements submitted to AAVSO.</ResponseField>
+        <ResponseField name="targets" type="object">Per-target breakdown from the night summary JSON.</ResponseField>
+        <ResponseField name="receipt" type="object">AAVSO submission receipt if available.</ResponseField>
+        <ResponseField name="generated_at" type="string">ISO 8601 UTC timestamp when the summary was compiled.</ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl -H "Authorization: Bearer <token>" \
+         "https://api.thetelescope.net/api/v1/me/nights?limit=7"
+    ```
+
+    ```json
+    {
+      "nights": [
+        {
+          "node_id": "node_a3f9b2c1",
+          "night": "2026-06-15",
+          "n_targets": 4,
+          "n_observations": 18,
+          "n_submitted": 16,
+          "targets": {"SS_Cyg": 6, "T_CrB": 5, "RR_Lyr": 4, "V_Cyg": 3},
+          "generated_at": "2026-06-15T11:00:00.000000+00:00"
+        }
+      ]
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## GET /api/v1/me/notifications
+
+Retrieve the notification inbox for the authenticated member, most recent first.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** `Authorization: Bearer <token>`
+
+    <ParamField query="limit" type="integer">
+      Maximum number of notifications to return. Default `50`, maximum `200`.
+    </ParamField>
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="notifications" type="array">
+      Array of notification records.
+
+      <Expandable title="Notification fields">
+        <ResponseField name="id" type="integer">Notification ID. Use with `POST /api/v1/me/notifications/{id}/read`.</ResponseField>
+        <ResponseField name="type" type="string">Notification category, e.g. `"night_summary"`, `"aavso_accepted"`, `"alert"`.</ResponseField>
+        <ResponseField name="payload" type="object">Structured notification data (varies by type).</ResponseField>
+        <ResponseField name="sent_at" type="string">ISO 8601 UTC timestamp.</ResponseField>
+        <ResponseField name="read_at" type="string">ISO 8601 UTC timestamp when marked read, or `null` if unread.</ResponseField>
+      </Expandable>
+    </ResponseField>
+
+    <ResponseField name="unread" type="integer">Count of unread notifications in the returned set.</ResponseField>
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl -H "Authorization: Bearer <token>" \
+         https://api.thetelescope.net/api/v1/me/notifications
+    ```
+
+    ```json
+    {
+      "notifications": [
+        {
+          "id": 1021,
+          "type": "night_summary",
+          "payload": {"night": "2026-06-15", "n_submitted": 16},
+          "sent_at": "2026-06-15T11:01:00.000000+00:00",
+          "read_at": null
+        }
+      ],
+      "unread": 1
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## POST /api/v1/me/notifications/{id}/read
+
+Mark a notification as read.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** `Authorization: Bearer <token>`
+
+    <ParamField path="id" type="integer" required>Notification ID from the notifications list.</ParamField>
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="ok" type="boolean">`true` when the read timestamp is recorded.</ResponseField>
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl -X POST \
+         -H "Authorization: Bearer <token>" \
+         https://api.thetelescope.net/api/v1/me/notifications/1021/read
+    ```
+
+    ```json
+    {"ok": true}
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## PUT /api/v1/me/notifications/prefs
+
+Update notification delivery preferences.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** `Authorization: Bearer <token>`
+
+    <ParamField body="notification_email" type="boolean">
+      Enable or disable email notifications.
+    </ParamField>
+
+    <ParamField body="notification_push" type="boolean">
+      Enable or disable push notifications to the registered mobile app.
+    </ParamField>
+
+    <ParamField body="push_token" type="string">
+      Mobile push token (up to 500 characters) to register or update.
+    </ParamField>
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="ok" type="boolean">`true` when preferences are updated.</ResponseField>
+
+    **400** is returned when the request body contains no recognised updatable fields.
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl -X PUT \
+         -H "Authorization: Bearer <token>" \
+         -H "Content-Type: application/json" \
+         -d '{"notification_email": true, "notification_push": false}' \
+         https://api.thetelescope.net/api/v1/me/notifications/prefs
+    ```
+
+    ```json
+    {"ok": true}
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## PUT /api/v1/me/nodes/{node_id}/vacation
+
+Pause a node's observation schedule until a specified date. Nights during the vacation window are excluded from the reliability score calculation. The scheduler will not generate plans for a node on vacation.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** `Authorization: Bearer <token>`
+
+    <ParamField path="node_id" type="string" required>Node identifier. The node must be claimed by this member.</ParamField>
+
+    <ParamField body="until_date" type="string" required>
+      ISO date string in `YYYY-MM-DD` format specifying the last day of vacation.
+    </ParamField>
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="ok" type="boolean">`true` when vacation is set.</ResponseField>
+    <ResponseField name="vacation_until" type="string">The date that was set.</ResponseField>
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl -X PUT \
+         -H "Authorization: Bearer <token>" \
+         -H "Content-Type: application/json" \
+         -d '{"until_date": "2026-07-01"}' \
+         https://api.thetelescope.net/api/v1/me/nodes/node_a3f9b2c1/vacation
+    ```
+
+    ```json
+    {"ok": true, "vacation_until": "2026-07-01"}
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## DELETE /api/v1/me/nodes/{node_id}/vacation
+
+Cancel an active vacation early, returning the node to its normal operating status.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** `Authorization: Bearer <token>`
+
+    <ParamField path="node_id" type="string" required>Node identifier. The node must be claimed by this member.</ParamField>
+  </Tab>
+  <Tab title="Response">
+    **200 OK** — `{"ok": true}`
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl -X DELETE \
+         -H "Authorization: Bearer <token>" \
+         https://api.thetelescope.net/api/v1/me/nodes/node_a3f9b2c1/vacation
+    ```
+
+    ```json
+    {"ok": true}
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## DELETE /api/v1/me
+
+Permanently delete the member account and all associated data including notifications, activation codes, node memberships, and help chat history. This action is irreversible.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** `Authorization: Bearer <token>`
+
+    <ParamField body="confirm" type="boolean" required>
+      Must be `true`. The server returns `400` if this field is absent or false, preventing accidental deletion.
+    </ParamField>
+  </Tab>
+  <Tab title="Response">
+    **200 OK** — `{"ok": true}`
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl -X DELETE \
+         -H "Authorization: Bearer <token>" \
+         -H "Content-Type: application/json" \
+         -d '{"confirm": true}' \
+         https://api.thetelescope.net/api/v1/me
+    ```
+  </Tab>
+</Tabs>

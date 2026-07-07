@@ -1,0 +1,383 @@
+---
+title: "First Run: Connect, Register, and Verify Your Node"
+sidebarTitle: "First Run"
+description: "Walk through your first successful node connection — from Seestar discovery via ALPACA, through cloud registration, to verifying your node appears in the member dashboard."
+---
+
+Starting the Node Agent for the first time is more than just launching software — it is the moment your telescope joins The Telescope Net. This page walks you through what happens during that first boot: how your activation code becomes a permanent node identity, how your Seestar is discovered on the local network, and how to confirm everything is working before you leave the setup unattended overnight.
+
+---
+
+## What Happens on First Boot
+
+When the Node Agent starts with a valid `activation_code` in `config.yaml` and no existing credentials in `data/cloud_state.json`, it goes through a one-time registration sequence:
+
+```
+Node Agent starts
+      ↓
+Reads config.yaml — finds activation_code: BS-2026-ABCD1234
+      ↓
+POST /api/v1/nodes/register
+  { activation_code, latitude, longitude, elevation,
+    telescope_model, filters, utc_offset_hours, … }
+      ↓
+Cloud validates code (not expired, not previously used)
+Cloud generates:  node_id  →  e.g. node_a3f9b2c1
+                  api_key  →  64-char random string
+Cloud creates the nodes table row with all hardware fields
+Cloud links node to your member account
+Cloud marks activation_code as used (activation_codes.used_at = now)
+      ↓
+Node receives { node_id, api_key }
+Saves to data/cloud_state.json
+Clears activation_code from config.yaml
+      ↓
+Registration complete — all subsequent API calls use node_id + api_key
+```
+
+<Warning>
+  Activation codes are **single-use**. Once the `POST /api/v1/nodes/register`
+  request succeeds, the code is permanently consumed and cannot be reused. If
+  you need to re-register the same hardware (e.g. after a clean install),
+  generate a new code from your member account page or via
+  `POST /api/v1/me/activation-code`.
+</Warning>
+
+---
+
+## ALPACA Device Discovery
+
+After registration, the Node Agent searches for your Seestar on the local network using the **ALPACA discovery protocol**:
+
+- Sends a **UDP broadcast** on port `32227` (configurable via `alpaca.discovery_port`)
+- Waits for Alpaca-compatible devices to respond — **timeout: 5 seconds** (configurable via `alpaca.discovery_timeout`)
+- Any Seestar in **Station Mode** on the same subnet replies with its IP address and port
+
+<Info>
+  Your Seestar **must be in Station Mode** (connected to your home WiFi) for
+  discovery to work. In Access Point mode the ALPACA HTTP service is not
+  active, and the Node Agent will refuse the connection with:
+  `Seestar is in Access Point (hotspot) mode — ALPACA is not active.`
+</Info>
+
+If the Seestar is found, the Node Agent proceeds to connect the configured
+devices (telescope, camera, cover calibrator) and then attempts to **auto-mount
+the Seestar SMB share**:
+
+- **macOS**: `mount_smbfs -N //guest:@<host>/seestar /Volumes/Seestar`
+- **Linux**: `mount -t cifs //<host>/seestar /mnt/seestar -o guest,uid=0,gid=0`
+
+Once the share is mounted and the Image Watcher is running, new FITS files
+written by the Seestar are automatically picked up and piped through the
+photometry pipeline.
+
+**Troubleshooting discovery:**
+
+- Verify the Seestar is powered on and shows a local IP in the Seestar app
+- Both the host machine and Seestar must be on the same subnet (no VLANs between them)
+- Some routers block UDP broadcast — test with `tcpdump -i en0 udp port 32227`
+- macOS may require allowing Python in **System Preferences → Privacy & Security**
+
+---
+
+## Dashboard Overview
+
+The local dashboard runs at **[http://localhost:5173](http://localhost:5173)** and is served by the Flask app in `src/dashboard.py`. It is the primary interface for monitoring and manually controlling your node.
+
+The dashboard's main sections:
+
+| Section | What it shows |
+|---------|--------------|
+| **Status bar** | Cloud registration state, last heartbeat timestamp, safety manager state, sun elevation |
+| **Telescope** | Live RA/Dec, slew/park/unpark/tracking controls, arm state |
+| **Camera** | Exposure controls, image preview, frame history with thumbnails |
+| **Schedule** | Current plan from the cloud, per-target progress, start/cancel controls |
+| **Photometry** | Last measurement (target, magnitude, uncertainty, SNR, quality flag), rolling session history |
+| **Config** | In-browser YAML editor — edits write to `config.yaml` directly |
+| **Logs** | Live log stream via Server-Sent Events, colour-coded by level |
+
+---
+
+## Dev Mode vs. Production Mode
+
+How you launch the Node Agent depends on your use case:
+
+<Tabs>
+  <Tab title="Dev Mode">
+    ```bash
+    # From the repo root, with venv active
+    python3 main.py
+    ```
+
+    `main.py` is a watchdog process that monitors `src/dashboard.py` for file
+    changes and automatically restarts it. This is convenient when developing
+    or debugging — save a file and the server restarts within a second.
+
+    **Not recommended for unattended overnight runs** — if the file watcher
+    itself crashes, the node stops until you restart it manually.
+  </Tab>
+
+  <Tab title="Production Mode">
+    ```bash
+    # Direct production entry point (used by all installers)
+    python3 src/main_service.py
+    ```
+
+    `src/main_service.py` runs the Flask app in-process with no subprocess
+    layer. This is what Windows services, launchd plists, and systemd units
+    invoke. It is more robust for long overnight sessions.
+
+    **All pre-built installers use this mode automatically.**
+  </Tab>
+</Tabs>
+
+---
+
+## Verifying Cloud Registration
+
+After the first boot you should confirm that your node is registered and
+actively communicating with the cloud.
+
+<Steps>
+  ### Check the log output
+
+  In dev mode, watch the terminal. In production, follow the service logs
+  (see [Installation](/node-setup/installation) for platform commands).
+
+  Look for these lines in sequence:
+
+  ```
+  Cloud communicator started → https://api.thetelescope.net
+  Registered with cloud as node_a3f9b2c1
+  Activation code cleared from config after successful registration
+  ```
+
+  If registration fails you will see a backoff warning instead:
+
+  ```
+  Cloud registration failed: HTTP 400: code already used
+  ```
+
+  ### Confirm credentials were saved
+
+  Check that `data/cloud_state.json` exists and contains your `node_id` and
+  `api_key`:
+
+  ```json
+  {
+    "node_id": "node_a3f9b2c1",
+    "api_key": "...",
+    "pair_token": "NOVA-4821"
+  }
+  ```
+
+  ### Check the dashboard cloud panel
+
+  Open [http://localhost:5173](http://localhost:5173) and navigate to the cloud
+  status panel. You should see:
+
+  - **Registered**: ✓
+  - **Node ID**: `node_a3f9b2c1`
+  - **Last heartbeat**: timestamp within the last 60 seconds
+  - **Last heartbeat OK**: ✓
+
+  ### Verify via the API
+
+  Call `GET /api/v1/nodes/me` with your node credentials to confirm the cloud
+  sees you:
+
+  ```bash
+  curl https://api.thetelescope.net/api/v1/nodes/me \
+       -H "X-Node-Id: node_a3f9b2c1" \
+       -H "X-Api-Key: <your_api_key>"
+  ```
+
+  A successful response returns your full node registry entry including
+  performance metrics, scheduler hints, and reliability score.
+
+  ### Check that your node appears in the member app
+
+  Log in to the member portal or Flutter app and navigate to **Nodes**. Your
+  telescope should appear in the list with its current online/offline status
+  and last heartbeat time.
+</Steps>
+
+---
+
+## Heartbeat Loop
+
+Every `cloud.heartbeat_interval` seconds (default: **60 seconds**), the
+`CloudCommunicator` sends a `POST /api/v1/nodes/heartbeat` with an optional
+conditions snapshot:
+
+```json
+{
+  "conditions": {
+    "safe": true,
+    "sun_elevation": -28.4,
+    "dawn_threshold": -18.0,
+    "heartbeat_ok": true,
+    "telescope_connected": true,
+    "camera_connected": true,
+    "schedule_running": true,
+    "schedule_target": "SS Cyg",
+    "schedule_phase": "exposing",
+    "schedule_frame": 3,
+    "schedule_frames": 20,
+    "auto_run_plans": true,
+    "cloud_registered": true,
+    "utc_offset_hours": -5.0
+  }
+}
+```
+
+The cloud uses the heartbeat to:
+- Mark the node **online** (visible in the member app and network status page)
+- Record the latest conditions snapshot to `nodes.last_conditions`
+- Update `utc_offset_hours` for accurate twilight calculations
+
+---
+
+## Plan Polling
+
+Every `cloud.plan_poll_interval` seconds (default: **300 seconds**), the plan
+poller calls `GET /api/v1/plan`. If the cloud returns a plan with a new
+`plan_id`, the node:
+
+1. Validates all observation items (RA/Dec bounds, exposure limits, etc.)
+2. If `auto_run_plans` is `true` — starts the schedule runner immediately in
+   a background thread
+3. If `auto_run_plans` is `false` — stores the plan as pending and logs a
+   warning; you must start it manually from the dashboard
+
+Each plan item is an `ObservationPlan` containing a list of `PlanItem` objects:
+
+```json
+{
+  "plan_id": "plan_2026-07-15_node_a3f9b2c1",
+  "night": "2026-07-15",
+  "items": [
+    {
+      "target": "SS Cyg",
+      "ra": 21.7825,
+      "dec": 43.586,
+      "expDur": 30.0,
+      "expCount": 20,
+      "binning": 1,
+      "startTime": "22:30",
+      "filter": "CV"
+    }
+  ]
+}
+```
+
+High-priority targets can also arrive as **interrupt messages** via
+`GET /api/v1/interrupts`. Interrupts bypass the plan queue and, if
+`time_critical`, immediately cancel any running schedule to observe the alert
+target first.
+
+---
+
+## SafetyManager Behaviour
+
+The `SafetyManager` runs as a daemon thread from the moment the Node Agent
+starts. It operates independently of the Flask routes so it can park the
+telescope even if the dashboard is unresponsive.
+
+Key behaviours:
+
+| Trigger | Action |
+|---------|--------|
+| ALPACA heartbeat fails | Attempt reconnect (`reconnect_attempts` × `reconnect_delay`) |
+| Reconnect fails; `disconnect_timeout` exceeded | Emergency park + disconnect |
+| Sun elevation > `dawn_elevation` | Emergency park (routine dawn stop) |
+| `SIGTERM` received (service stop) | Park telescope, then exit |
+| `SIGINT` received (Ctrl+C in dev mode) | Park telescope, then raise `KeyboardInterrupt` |
+| Cloud heartbeat fails > `disconnect_park_timeout` seconds | Emergency park via cloud disconnect monitor |
+
+Dawn parking auto-clears: once the sun drops back below the dawn elevation
+threshold (e.g. for multi-session nights near the solstice), the Safety
+Manager automatically resets the unsafe state and re-establishes the telescope
+connection — you do not need to restart the Node Agent.
+
+<Warning>
+  A safety-triggered emergency park latches the unsafe state. It does **not**
+  self-clear after the original cause resolves (except for dawn, which uses
+  the auto-clear logic above). To manually recover after a connectivity-based
+  park, either restart the Node Agent or use the dashboard's **Reset Safety**
+  button.
+</Warning>
+
+---
+
+## Activation Code Flow (Summary)
+
+```
+Member signs up at thetelescope.net
+            ↓
+Member requests a code:
+  POST /api/v1/me/activation-code
+  → { "code": "BS-2026-ABCD1234", "expires_at": "..." }
+            ↓
+Member downloads the installer for their OS
+Installer prompts for the activation code
+Writes it to config.yaml:
+  cloud:
+    activation_code: 'BS-2026-ABCD1234'
+            ↓
+Node Agent starts for the first time
+First heartbeat attempt triggers registration:
+  POST /api/v1/nodes/register  { activation_code + hardware payload }
+            ↓
+Cloud validates: not expired, not previously used
+Cloud generates node_id + api_key
+Cloud populates nodes table row
+Cloud links node to member account
+Cloud marks code used
+            ↓
+Node saves node_id + api_key → data/cloud_state.json
+Clears activation_code from config.yaml
+            ↓
+Subsequent API calls use node_id + api_key directly
+The activation code is never sent again
+```
+
+---
+
+## Verification Checklist
+
+Use these steps to confirm your node is fully operational before your first
+unattended night:
+
+<Steps>
+  ### Logs show "Registered with cloud"
+  The line `Registered with cloud as node_XXXXXXXX` confirms one-time
+  registration succeeded and credentials are persisted.
+
+  ### Dashboard cloud panel shows green
+  `Registered: ✓`, `Last heartbeat OK: ✓`, and a heartbeat timestamp within
+  the last 60 seconds.
+
+  ### Telescope and camera connected
+  Both devices show `Connected: ✓` in the dashboard status panel. You should
+  see live RA/Dec updating in the telescope section.
+
+  ### Image watcher active
+  The image watcher section shows `Enabled: ✓` with the correct `watch_path`
+  (your Seestar's SMB share mount point). Take a manual exposure from the
+  Seestar app — within a few seconds the dashboard should show the FITS file
+  detected and a photometry result.
+
+  ### AAVSO dry-run test passes
+  If you have set `aavso.dry_run: true`, check `aavso_submissions/` for the
+  generated `.txt` file. Confirm the observer code, target name, and magnitude
+  format look correct. Then set `dry_run: false` for live submissions.
+
+  ### Plan received from cloud
+  Wait up to 5 minutes for the first plan poll. The dashboard schedule section
+  should populate with tonight's observation targets and start times.
+</Steps>
+
+For detailed configuration of each section, see
+[Configuration](/node-setup/configuration). For OS-specific service management,
+return to [Installation](/node-setup/installation).

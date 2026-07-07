@@ -1,0 +1,126 @@
+{
+  "projectType": "saas",
+  "projectName": "The Telescope Net",
+  "projectDescription": "An accessible astronomy network that autonomously schedules, processes, and submits scientific observations from donated Seestar telescopes to AAVSO, enabling anyone—including people with disabilities—to contribute real science without manual intervention.",
+  "theme": "luma",
+  "primaryColor": "#04050c",
+  "lightColor": "#7c8484",
+  "darkColor": "#cfcfd0",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Guide",
+        "groups": [
+          {
+            "group": "Introduction",
+            "pages": [
+              "introduction",
+              "how-it-works",
+              "science-program"
+            ]
+          },
+          {
+            "group": "Node Setup",
+            "pages": [
+              "node-setup/quickstart",
+              "node-setup/installation",
+              "node-setup/configuration",
+              "node-setup/first-run"
+            ]
+          },
+          {
+            "group": "Cloud Server",
+            "pages": [
+              "cloud/quickstart",
+              "cloud/configuration",
+              "cloud/scheduler",
+              "cloud/chorus"
+            ]
+          },
+          {
+            "group": "Member App",
+            "pages": [
+              "app/overview",
+              "app/building"
+            ]
+          },
+          {
+            "group": "Operations",
+            "pages": [
+              "operations/aavso-submissions",
+              "operations/weight-tuning",
+              "operations/building-installers",
+              "operations/troubleshooting"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "api/overview",
+              "api/authentication"
+            ]
+          },
+          {
+            "group": "Endpoints",
+            "pages": [
+              "api/node-endpoints",
+              "api/member-endpoints",
+              "api/public-endpoints",
+              "api/admin-endpoints"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "AI-powered CHORUS scheduler: submodular optimization assigns targets to telescope nodes based on predicted photometric information gain",
+    "Automated photometry pipeline: ASTAP plate solve → comparison stars → aperture photometry → AAVSO submission",
+    "Node agent: cross-platform Python daemon controlling Seestar telescopes via ALPACA API with FSEvents/inotify image watching",
+    "Claude-powered weight tuning monitor with backtest gate for observability scoring weights",
+    "Flutter member app (iOS, Android, web/PWA) with accessibility-first design (VoiceOver, TalkBack, haptics, sonification)",
+    "Multi-source alert ingestion: ALeRCE, ATLAS, ASAS-SN, AAVSO, Gaia, TNS",
+    "Reliability ledger: per-node Beta posteriors for p_exec, p_accept, kappa (hardware-normalized precision skill)",
+    "Cross-platform installer system: NSIS (Windows), .pkg (macOS), systemd (Linux)",
+    "Node activation code system linking member accounts to telescope hardware",
+    "Interactive marketing site with live network stats, Aladin Lite sky visualization"
+  ],
+  "publicApiSurface": [
+    "POST /api/v1/nodes/register",
+    "POST /api/v1/nodes/heartbeat",
+    "GET  /api/v1/nodes/me",
+    "GET  /api/v1/plan",
+    "POST /api/v1/measurements",
+    "POST /api/v1/images",
+    "GET  /api/v1/interrupts",
+    "POST /api/v1/auth/register",
+    "POST /api/v1/auth/login",
+    "GET  /api/v1/me",
+    "GET  /api/v1/me/nodes",
+    "POST /api/v1/me/nodes/<id>",
+    "POST /api/v1/me/activation-code",
+    "GET  /api/v1/me/observations",
+    "GET  /api/v1/me/stats",
+    "GET  /api/v1/me/nights",
+    "GET  /api/v1/me/notifications",
+    "POST /api/v1/me/notifications/<id>/read",
+    "PUT  /api/v1/me/notifications/prefs",
+    "GET  /api/v1/targets",
+    "GET  /api/v1/lightcurves/<name>",
+    "GET  /api/v1/network/status",
+    "GET  /api/v1/health",
+    "GET  /api/v1/weather",
+    "GET  /api/v1/light-pollution",
+    "POST /api/v1/admin/ingest",
+    "POST /api/v1/admin/replan",
+    "POST /api/v1/admin/activation-codes",
+    "POST /api/v1/interrupts",
+    "GET  /api/v1/admin/tuning",
+    "POST /api/v1/admin/tuning/rollback"
+  ]
+}

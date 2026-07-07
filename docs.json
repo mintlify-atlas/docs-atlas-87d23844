@@ -1,72 +1,94 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mintlify Starter Kit",
+  "name": "The Telescope Net",
+  "theme": "luma",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#04050c",
+    "light": "#7c8484",
+    "dark": "#cfcfd0"
   },
-  "favicon": "/favicon.svg",
-  "navigation": {
-    "pages": [
-      {
-        "group": "Getting Started",
-        "pages": [
-          "index",
-          "quickstart"
-        ]
-      }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
-  },
+  "favicon": "https://media.brand.dev/6bfd4f33-9068-42b2-b319-84be85c3a43e.svg",
   "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
     "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://app.mintlify.com"
+      "type": "github",
+      "href": "https://github.com/ManiFed/TTN"
     }
-  },
-  "contextual": {
-    "options": [
-      "copy",
-      "view",
-      "chatgpt",
-      "claude",
-      "perplexity",
-      "mcp",
-      "cursor",
-      "vscode"
-    ]
   },
   "footer": {
     "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
+      "github": "https://github.com/ManiFed/TTN"
     }
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Guide",
+        "groups": [
+          {
+            "group": "Introduction",
+            "pages": [
+              "introduction",
+              "how-it-works",
+              "science-program"
+            ]
+          },
+          {
+            "group": "Node Setup",
+            "pages": [
+              "node-setup/quickstart",
+              "node-setup/installation",
+              "node-setup/configuration",
+              "node-setup/first-run"
+            ]
+          },
+          {
+            "group": "Cloud Server",
+            "pages": [
+              "cloud/quickstart",
+              "cloud/configuration",
+              "cloud/scheduler",
+              "cloud/chorus"
+            ]
+          },
+          {
+            "group": "Member App",
+            "pages": [
+              "app/overview",
+              "app/building"
+            ]
+          },
+          {
+            "group": "Operations",
+            "pages": [
+              "operations/aavso-submissions",
+              "operations/weight-tuning",
+              "operations/building-installers",
+              "operations/troubleshooting"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "api/overview",
+              "api/authentication"
+            ]
+          },
+          {
+            "group": "Endpoints",
+            "pages": [
+              "api/node-endpoints",
+              "api/member-endpoints",
+              "api/public-endpoints",
+              "api/admin-endpoints"
+            ]
+          }
+        ]
+      }
+    ]
   }
 }

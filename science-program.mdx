@@ -1,0 +1,247 @@
+---
+title: "Science Program: Targets, Scoring, and Quality Gates"
+sidebarTitle: "Science Program"
+description: "Learn which astronomical targets The Telescope Net prioritizes, how the composite scoring function ranks them, and which quality gates measurements must pass before AAVSO submission."
+---
+
+The Telescope Net's science program is built around one central insight: a distributed network of small, autonomous telescopes can provide something professional facilities cannot — continuous, 24-hour multi-longitude coverage of bright transients and variable stars, at cadences that keep pace with the rapid evolution of events as they unfold. Every target in the queue has been evaluated against a composite scoring formula, and every measurement the network produces must pass a set of quality gates before it is submitted to AAVSO. This page explains both.
+
+## Primary Science Program: Bright Transient Follow-up
+
+The highest-priority targets are bright transient events in progress. These are targets where dense, timely light curves have the greatest scientific value — where missing a night genuinely degrades the science.
+
+- **Classical novae** (typical peak magnitude 4–12): novae evolve on timescales of days, and their light curves constrain the mass of the white dwarf and the ejected shell. The Telescope Net's Tier 1 Seestar nodes are well-suited to novae at peak because they are bright enough to achieve high SNR without long exposures.
+- **Supernovae in nearby galaxies** (magnitude 10–16 at peak): early multi-band photometry of supernovae constrains shock breakout physics and progenitor models. Type Ia light curves are used as cosmological distance indicators; their plateau shapes must be sampled densely.
+- **Cataclysmic variable (CV) outbursts** (magnitude 10–15 in outburst): CVs brighten by 5–9 magnitudes in hours. Catching the rise, peak, and decline is essential for understanding the accretion disk instability mechanism.
+- **AGN flares** (magnitude 12–15): active galactic nuclei occasionally brighten dramatically. Long-baseline photometry from a distributed network provides context that single-observatory campaigns cannot.
+
+## Secondary Science Program: Variable Star Monitoring
+
+When no high-priority transients are available, nodes observe a curated list of long-term variable star monitoring targets. These form the steady-state filling program that keeps every node productive on every clear night.
+
+- **Long-period variables** (Miras, semi-regulars): period–luminosity relations require dense light curves spanning full cycles of 100–600 days.
+- **Eclipsing binaries**: precise eclipse timing constrains orbital period changes, mass transfer, and the presence of third bodies.
+- **Cataclysmic variables in quiescence**: quiescent CVs provide the baseline against which outburst properties are measured. Continuous monitoring is needed to catch the onset of outbursts.
+- **Be stars**: Be stars exhibit episodic outbursts associated with equatorial disk formation. Early detection requires monitoring cadences of days to weeks.
+- **Active galactic nuclei**: long-term AGN baselines from citizen networks complement professional spectroscopic campaigns.
+
+<Note>
+  When no high-priority transient or variable star target is schedulable from a given node, the scheduler falls back to the AAVSO permanent monitoring list — a curated set of historically significant variables that AAVSO requests continuous coverage for, including SS Cyg, U Gem, Z Cam, RS Oph, T CrB, and others.
+</Note>
+
+## Alert Sources
+
+The cloud server polls six public astronomical alert streams every 60 minutes and cross-matches new candidates against the existing target database within a 3 arcsecond matching radius. Sources that report the same transient are merged into a single target record.
+
+| Source | Type | What It Provides |
+|--------|------|-----------------|
+| **ALeRCE** | ZTF transient broker | Recent bright transients with SN-like classification; probability-ranked candidates from the ZTF alert stream |
+| **ATLAS** | ATLAS transient server (QUB) | Independently discovered transients from the ATLAS sky survey; token-authenticated JSON feed |
+| **ASAS-SN** | ASAS-SN Sky Patrol v2 | All-sky automated survey transients; strong coverage of CV outbursts and supernovae |
+| **AAVSO** | VSX "targets of interest" | Long-term variable star watch list via the VSX API; these targets never expire from the queue |
+| **Gaia** | Gaia Photometric Science Alerts | Public CSV of all Gaia alerts; covers transients identified in Gaia's continuous all-sky photometry |
+| **TNS** | Transient Name Server | Official IAU transient registry; requires a free bot account for API access |
+
+<Tip>
+  AAVSO targets are the only source that never expire. All other transient targets are automatically deactivated if no alert source refreshes them within 45 days (configurable via `alerts.expire_days` in `cloud/config.yaml`).
+</Tip>
+
+## Composite Scoring Formula
+
+Every active target is scored against every active node at least once per hour. The resulting score determines which targets appear in each node's nightly plan and in what order. The scoring formula has six components, each normalised to 0–1.
+
+```
+Score = w_brightness · brightness_match
+      + w_science    · scientific_value
+      + w_time       · time_criticality
+      + w_coverage   · coverage_gap
+      + w_observe    · observability
+      + w_roi        · science_roi
+```
+
+The default composite weights are:
+
+| Component | Default Weight | What It Measures |
+|-----------|---------------|-----------------|
+| `brightness_match` | 0.20 | How well the target's current magnitude fits inside the node's bright and faint limits |
+| `scientific_value` | 0.25 | Baseline priority of the target type (see table below) |
+| `time_criticality` | 0.15 | Urgency — fresh transients score 1.0 on day 0, decaying exponentially with a 12-day half-life |
+| `coverage_gap` | 0.15 | Blend of short-term recency (40%) and historical neglect weighted by science priority (60%) |
+| `observability` | 0.25 | Composite of altitude, weather, moon, light pollution, visibility window, and telescope match |
+| `science_roi` | 0.10 | Empirical yield from recent network outcomes — accepted AAVSO data, cadence gap closures, timely coverage of critical windows |
+
+The final score for a (target, node) pair is further multiplied by the node's reliability score to prefer nodes with proven track records over untested ones:
+
+```
+total_score = theoretical_score × (0.5 + 0.5 × reliability_score)
+```
+
+A target that is not observable from a node tonight (below the minimum altitude for the entire night) always scores zero, regardless of how high its other components are.
+
+## Scientific Value by Target Type
+
+The `scientific_value` component uses a fixed priority baseline per target class, reflecting the relative value of observations that a small network of Seestar telescopes can contribute to professional astronomy.
+
+| Target Type | Code | Scientific Value | Rationale |
+|-------------|------|-----------------|-----------|
+| Classical nova | `NOVA` | 0.90 | Early light curves are high-value; Seestar magnitude range ideal |
+| Supernova | `SN` | 0.95 | Early light curves are gold; Type Ia cosmological standard candles |
+| Tidal disruption event | `TDE` | 0.90 | Rare, scientifically rich; rapid multi-night follow-up critical |
+| Gamma-ray burst optical afterglow | `GRB` | 0.90 | Extremely time-critical; any data within hours is valuable |
+| Exoplanet transit | `EXOPLANET` | 0.85 | Transit timing windows are time-critical and publishable |
+| CV outburst | `CV` | 0.80 | Outburst rise and decline are scientifically important |
+| Eclipsing binary | `EB` | 0.55 | Eclipse timing is valuable on a fixed schedule |
+| Young stellar object | `YSO` | 0.55 | Irregular variability; useful for long-baseline monitoring |
+| AGN | `AGN` | 0.50 | Long-term baseline monitoring; lower urgency |
+| Generic variable | `VAR` | 0.50 | Catch-all; lower priority than named programs |
+| Unknown | — | 0.40 | Minimal allocation until classification improves |
+
+## Time Criticality Decay
+
+Time-critical targets (those with `time_critical = True` in the database) receive a time criticality score that starts at 1.0 on the day of discovery and decays exponentially, with a floor of 0.3 to ensure they remain in the queue even after the acute phase has passed.
+
+```python
+# time_critical = True
+score = max(0.3, 1.0 * exp(-age_days / 12.0))
+
+# time_critical = False (long-period variables, eclipsing binaries)
+score = 0.2  # fixed baseline
+```
+
+The decay scale of 12 days means a nova discovered today scores 1.0, the same nova after one week scores ~0.56, and after three weeks scores ~0.17 (floored to 0.30). This prioritises fresh transients without permanently demoting slower-evolving targets.
+
+| Object Class | Characteristic Timescale | Scheduling Implication |
+|--------------|--------------------------|----------------------|
+| Kilonova | Hours | Requires interrupt mechanism; very few hours of opportunity |
+| GRB afterglow | Hours to days | Interrupt priority; first night critical |
+| Nova at peak | Days | High priority for first 2–3 weeks after discovery |
+| Supernova | Days to weeks | Sustained high priority for 3–6 weeks |
+| CV outburst | Days | High priority while in outburst |
+| Mira at maximum | Weeks | Moderate priority; predictable schedule |
+| Eclipsing binary | Fixed schedule | Cadence-driven; not time-critical between eclipses |
+
+## Observability Requirements
+
+The `observability` component of the score is itself a weighted blend of six sub-factors. Each sub-factor is normalised to 0–1; the blend is normalised by the sum of sub-weights so that the total always stays in the 0–1 range.
+
+```python
+observability = (
+    w["light_pollution"] * light_pollution_factor  +
+    w["weather"]         * weather_factor           +
+    w["moon"]            * moon_factor              +
+    w["airmass"]         * airmass_factor           +
+    w["window"]          * window_factor            +
+    w["telescope"]       * telescope_match
+) / sum(w.values())
+```
+
+**Default observability sub-weights:**
+
+| Sub-Factor | Default Weight | What It Measures |
+|------------|---------------|-----------------|
+| `weather` | 0.25 | Clear-sky fraction + seeing quality + atmospheric transparency over the coming night |
+| `light_pollution` | 0.20 | Sky brightness (MPSAS) penalty scaled by how faint the target is relative to the node's magnitude limit |
+| `moon` | 0.15 | Lunar illumination × proximity penalty; < 10° separation scores 0.05 |
+| `airmass` | 0.15 | Best achievable airmass for the target from this node tonight (X=1 → 1.0, X=3 → 0) |
+| `window` | 0.15 | Fraction of the night the target is visible above the minimum altitude; ≥4 hours = 1.0 |
+| `telescope` | 0.10 | Hardware capability match — aperture, field of view, and filter set suitability for the target class |
+
+**Hard requirements that override the score:**
+
+- Target must clear the node's minimum altitude (default 25°, configurable per node) at some point during the night, or the score is forced to zero.
+- The node's `horizon_mask` (a JSON polygon of local obstructions) is respected — targets behind trees or buildings are never scheduled, regardless of their computed altitude.
+- Moon distance must be above 30° for a target to receive a non-negligible moon factor.
+
+These sub-weights are tunable. When `tuning.enabled: true` in `cloud/config.yaml`, a nightly Claude-powered advisory monitor analyses recent observation outcomes and may propose adjustments of up to ±5% per weight per night, subject to audit and rollback.
+
+## Quality Control Gates
+
+Before any measurement is included in an AAVSO batch, it must pass four hard quality gates. Measurements that fail any gate are retained in the database with their quality flag for diagnostics but are never submitted.
+
+| Gate | Threshold | Why It Matters |
+|------|-----------|---------------|
+| **Signal-to-noise ratio** | SNR > 20 | Below this threshold, photon noise dominates and the measurement adds more uncertainty than information to the AAVSO record |
+| **Photometric uncertainty** | Uncertainty < 0.3 mag | AAVSO's quality ceiling; measurements with larger uncertainties are flagged as `poor` |
+| **Comparison stars** | ≥ 3 stars | Differential photometry requires a minimum ensemble to compute a stable zero-point and detect outlier comparison stars |
+| **Airmass** | Airmass < 3.0 | At X > 3.0, differential atmospheric extinction between target and comparison stars introduces systematic errors that exceed the photometric precision |
+
+Measurements that pass all four gates receive a `good` or `acceptable` quality flag and enter the AAVSO submission queue. Borderline cases go to the human review queue.
+
+<Warning>
+  Measurements with `quality_flag = "poor"` are **never** submitted to AAVSO by default. Enabling `submit_poor_quality: true` in `config.yaml` overrides this and is not recommended for production nodes.
+</Warning>
+
+## AAVSO Submission Format
+
+Accepted measurements are submitted to the AAVSO WebObs API in AAVSO Extended File Format. Each batch file contains a header block followed by comma-delimited measurement records.
+
+```
+#TYPE=EXTENDED
+#OBSCODE=[member observer code]
+#SOFTWARE=The Telescope Net Pipeline v[X]
+#DELIM=,
+#DATE=BJD
+#OBSTYPE=CCD
+```
+
+**Fields per measurement record:**
+
+| Field | Description |
+|-------|-------------|
+| `STARID` | AAVSO VSX target name (e.g., `SS CYG`) |
+| `DATE` | Barycentric Julian Date (BJD_TCB) |
+| `MAGNITUDE` | Calibrated differential magnitude |
+| `MAGERR` | 1σ photometric uncertainty |
+| `FILTER` | Filter code (e.g., `CV` for unfiltered visual, `V`, `B`, `R`, `I`) |
+| `TRANSFORMED` | Whether the measurement has been transformed to the standard system |
+| `MTYPE` | Measurement type (`STD` = standard, `DIF` = differential) |
+| `CNAME` | Comparison star designation |
+| `CMAG` | Comparison star magnitude |
+| `KNAME` | Check star designation |
+| `KMAG` | Check star magnitude |
+| `AMASS` | Airmass at time of observation |
+| `GROUP` | Node identifier (groups measurements from the same node) |
+| `CHART` | AAVSO chart ID used for comparison star selection |
+| `NOTES` | Pipeline version and any relevant flags |
+
+## Node Data Model and Reliability Score
+
+The scheduler's view of each telescope is defined by the `nodes` table. The most consequential derived value is the `reliability_score`, a composite 0–1 multiplier that is recomputed nightly from ground-truth outcomes and applied to every (target, node) score pair.
+
+**Reliability formula** (computed in `registry.refresh_node_performance()`):
+
+```python
+reliability = (
+    0.40 * aavso_acceptance_rate
+  + 0.25 * (1 - outlier_rate)
+  + 0.20 * min(1.0, clear_nights_30d / 30)
+  + 0.15 * precision_factor
+)
+
+precision_factor = max(0, 1 - mean_uncertainty / 0.30)
+```
+
+| Reliability | Score Multiplier | Meaning |
+|-------------|-----------------|---------|
+| 1.0 | ×1.00 | Proven node — full score, no penalty |
+| 0.5 | ×0.75 | New or data-sparse node — slight preference for proven peers |
+| 0.0 | ×0.50 | Persistently poor data — still receives some assignments (floor prevents starvation) |
+
+New nodes (fewer than 10 observations) start at **0.50** and converge toward their true reliability over roughly 20–30 observations. The formula is intentionally multi-dimensional: a node cannot inflate its score by gaming one metric — it must deliver across AAVSO acceptance rate, cross-validation consistency, operational uptime, and photometric precision simultaneously.
+
+## Geographic Strategy for 24-Hour Coverage
+
+Continuous coverage of time-critical targets requires nodes distributed across longitude zones. The Telescope Net targets four zones, each contributing approximately 6–8 hours of primary coverage per night.
+
+| Zone | Region | UTC Offset | Target Share | Coverage Window (UTC) |
+|------|--------|-----------|-------------|----------------------|
+| 1 | Americas | −8 to −4 | 30% | 01:00–09:00 |
+| 2 | Europe / Africa | 0 to +3 | 30% | 20:00–04:00 |
+| 3 | Asia / Pacific | +8 to +12 | 30% | 11:00–19:00 |
+| 4 | Middle East / India | +4 to +7 | 10% | Gap-filling |
+
+With this distribution, any target above approximately −60° declination can be observed continuously for 24 hours by a relay of nodes across zones. No bright transient in the northern or equatorial sky is ever more than a few hours away from a node that can observe it.
+
+<Tip>
+  The scheduler accounts for longitude distribution when assigning targets. It gives soft preference to nodes whose longitude zone provides the best coverage for a target at a given time — helping the network function as a coherent instrument rather than a collection of independent telescopes.
+</Tip>

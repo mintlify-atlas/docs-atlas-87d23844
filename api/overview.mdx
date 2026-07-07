@@ -1,0 +1,94 @@
+---
+title: "Cloud API Overview and Base URL"
+sidebarTitle: "Overview"
+description: "The Telescope Net REST API serves node agents, member apps, and public consumers. Base URL, versioning, content type, and response format reference."
+---
+
+The Telescope Net cloud exposes a single versioned REST API used by three distinct caller types: autonomous node agents running on donated Seestar telescopes, authenticated member apps and dashboards, and unauthenticated public consumers. All endpoints share a common base URL, content-type convention, and JSON error envelope, making it straightforward to integrate from any HTTP client.
+
+## Base URL and versioning
+
+Every API endpoint is served under:
+
+```
+https://api.thetelescope.net/api/v1/
+```
+
+The `/api/v1/` prefix is stable for all documented endpoints. Future breaking changes will be introduced under a new version prefix rather than modifying existing routes.
+
+<Note>
+The root URL (`/`) serves `tour.html` — the public marketing site. `/dashboard` serves the member portal single-page application. Neither of these is part of the API surface.
+</Note>
+
+## Content type
+
+All requests that include a body must set `Content-Type: application/json`. All responses are returned as `application/json` unless otherwise noted (multipart for file uploads, binary for file downloads).
+
+## Authentication schemes
+
+Three authentication schemes are supported depending on the caller type. See the [Authentication guide](/api/authentication) for full details including header names, token acquisition flows, and code examples.
+
+| Caller | Scheme | Headers |
+|---|---|---|
+| Node agent | API key pair | `X-Node-Id` + `X-Api-Key` |
+| Member / app | Bearer token | `Authorization: Bearer <token>` |
+| Admin operator | Shared key | `X-Admin-Key` |
+
+## Endpoint categories
+
+<CardGroup cols={2}>
+  <Card title="Node Endpoints" icon="satellite-dish" href="/api/node-endpoints">
+    Authenticated with `X-Node-Id` + `X-Api-Key`. Used by node agents for registration, 60-second heartbeats, observation plan download, photometry upload, FITS image storage, AAVSO file upload, and interrupt polling.
+  </Card>
+  <Card title="Member Endpoints" icon="user" href="/api/member-endpoints">
+    Authenticated with `Authorization: Bearer <token>`. Used by the member dashboard and mobile app for account management, node registration, observation history, cumulative stats, night summaries, and notification preferences.
+  </Card>
+  <Card title="Public Endpoints" icon="globe" href="/api/public-endpoints">
+    No authentication required. Returns active target queues, historical light curves, live network status, weather forecasts, and sky brightness data. Used by the marketing site for live statistics.
+  </Card>
+  <Card title="Admin Endpoints" icon="shield-halved" href="/api/admin-endpoints">
+    Authenticated with `X-Admin-Key`. Triggers alert ingestion, rescoring, plan regeneration, bulk activation code generation, interrupt broadcasts, and scoring weight management.
+  </Card>
+</CardGroup>
+
+## Health check
+
+Use the health endpoint to verify the API and its database connection are reachable before making authenticated calls:
+
+```bash
+curl https://api.thetelescope.net/api/v1/health
+```
+
+```json
+{
+  "ok": true,
+  "db": true,
+  "server_time": "2026-06-15T02:30:00.000000+00:00"
+}
+```
+
+A `503` status with `"ok": false` indicates a database connectivity problem. The `server_time` field is always an ISO 8601 UTC timestamp.
+
+## Error responses
+
+All error responses use a consistent envelope with a single `error` field:
+
+```json
+{
+  "error": "activation code already used"
+}
+```
+
+Standard HTTP status codes apply: `400` for validation failures, `401` for missing or invalid credentials, `404` for unknown resources, `409` for conflicts (e.g. duplicate registration), and `410` for expired resources (e.g. expired activation codes).
+
+## CORS
+
+All responses include permissive CORS headers (`Access-Control-Allow-Origin: *`), allowing browser clients — including the marketing site and the member dashboard running from a separate origin during development — to call public JSON endpoints directly.
+
+## Rate limits
+
+Rate limiting is not explicitly documented in the current server implementation. Clients should apply reasonable backoff on `429` or `503` responses. The 60-second heartbeat cadence used by node agents is the expected maximum call frequency for polling endpoints.
+
+## File size limits
+
+The server accepts request bodies up to **128 MB** for image uploads. AAVSO extended format text files are capped at **512 KB** per upload.

@@ -1,0 +1,247 @@
+---
+title: "Build and Run the Flutter Member App"
+sidebarTitle: "Building"
+description: "Set up Flutter, configure the API base URL, run the member app against a local cloud server, and produce web, iOS, and Android builds for deployment."
+---
+
+The member app is a standard Flutter project located in the `app/` directory of the repository. It talks exclusively to the cloud server's member API (`/api/v1/*`) and requires no direct connection to telescope nodes. To run it locally you need Flutter installed and the cloud server running — everything else is handled by `flutter pub get` and a single `dart-define`.
+
+## Prerequisites
+
+- **Flutter SDK ≥ 3.27** — [installation guide](https://docs.flutter.dev/get-started/install)
+- **Cloud server running** — the app has no offline mode; it reads live data from the backend
+- **Dart SDK ≥ 3.6** (bundled with Flutter)
+- For iOS builds: macOS with Xcode installed
+- For Android builds: Android Studio or the Android SDK command-line tools
+
+<Info>
+  The `app/` directory ships with only the Dart source — no `android/` or `ios/` platform
+  folders are committed to the repository. Run `flutter create .` inside `app/` once after
+  cloning to generate those folders before running on a device.
+</Info>
+
+## Quick Start
+
+<Steps>
+  <Step title="Start the cloud server">
+    In a separate terminal, start the cloud API on port 8800. The app will not load data without it.
+
+    ```bash
+    cd cloud/
+    PYTHONPATH="$PWD:$PWD/src" python3 -m cloud.main
+    # API available at http://localhost:8800
+    # Health check: http://localhost:8800/api/v1/health
+    ```
+  </Step>
+
+  <Step title="Generate platform folders (first time only)">
+    If you have never run the app before, generate the Android and iOS platform folders in place. This keeps `lib/` and `pubspec.yaml` intact.
+
+    ```bash
+    cd app
+    flutter create .
+    ```
+  </Step>
+
+  <Step title="Fetch dependencies">
+    ```bash
+    cd app
+    flutter pub get
+    ```
+  </Step>
+
+  <Step title="Run the app against your local cloud">
+    Pass the API base URL as a `dart-define`. Use `localhost` for the iOS/Android simulator or the web renderer. For a physical device on the same LAN, substitute your computer's LAN IP address.
+
+    ```bash
+    # Simulator / web
+    flutter run --dart-define=BS_API_BASE=http://localhost:8800
+
+    # Physical device on the same LAN (replace with your host IP)
+    flutter run --dart-define=BS_API_BASE=http://192.168.1.20:8800
+    ```
+
+    <Note>
+      Android requires cleartext HTTP to be allowed for local testing. Use HTTPS in production
+      or add a `network_security_config.xml` to the Android manifest for development.
+    </Note>
+  </Step>
+</Steps>
+
+<Tip>
+  Populate the cloud database with realistic data before your first run so the app has
+  something to display. Run `python3 scripts/seed_demo.py --wipe` from the repository root
+  to create 23 nodes across 14 countries and a light curve for SS Cygni. Nodes stay
+  "online" for 15 minutes after seeding — re-run to refresh.
+</Tip>
+
+## API Base URL Configuration
+
+The app resolves its API base URL in `app/lib/config.dart` using the following priority order:
+
+```dart
+// app/lib/config.dart
+static String get apiBase {
+  if (_definedApiBase.isNotEmpty) return _definedApiBase;        // --dart-define=API_BASE=...
+  if (_legacyDefinedApiBase.isNotEmpty) return _legacyDefinedApiBase; // --dart-define=BS_API_BASE=...
+  final origin = Uri.base.origin;
+  if (origin.isEmpty || origin == 'null') return _productionBase; // native: hardcoded production
+  return origin;                                                   // web: page origin (auto)
+}
+
+static const String _productionBase = 'https://api.thetelescope.net';
+```
+
+| Scenario | How to set the URL |
+|----------|-------------------|
+| Local development | `--dart-define=BS_API_BASE=http://localhost:8800` |
+| Local dev (alternate) | `--dart-define=API_BASE=http://localhost:8800` |
+| Web build (same-origin) | No flag needed — derives from `Uri.base.origin` |
+| Production native build | No flag needed — falls back to `https://api.thetelescope.net` |
+
+All cloud routes are prefixed with `/api/v1` by the constant `AppConfig.apiPrefix` in the same file.
+
+## Web Build
+
+The web build is a standard Flutter web output suitable for serving as a PWA from any static file server or CDN. It is also included automatically in Railway deployments via `scripts/deploy-api.sh`.
+
+```bash
+flutter build web
+# Output: app/build/web/
+```
+
+To test the web build locally against the cloud server:
+
+```bash
+flutter build web --dart-define=BS_API_BASE=http://localhost:8800
+cd app/build/web
+python3 -m http.server 4280
+# Open http://localhost:4280
+```
+
+## iOS Build
+
+iOS builds require macOS and Xcode. The platform folder is at `app/ios/`.
+
+```bash
+# Open in Xcode for signing and device deployment
+open app/ios/Runner.xcworkspace
+
+# Or build from the command line (requires a valid signing identity)
+flutter build ios --dart-define=BS_API_BASE=https://api.thetelescope.net
+```
+
+### Native iOS Experiment
+
+An experimental SwiftUI shell lives at `app/ios-native/BoundlessSkies.xcodeproj`. It is a parallel native implementation that explores deeper platform integration for haptics, TTS accessibility, and native iOS navigation patterns. This is separate from the main Flutter app and does not replace it.
+
+## Android Build
+
+```bash
+flutter build apk --dart-define=BS_API_BASE=https://api.thetelescope.net
+# Output: app/build/app/outputs/flutter-apk/app-release.apk
+
+# Or as an App Bundle for Play Store submission
+flutter build appbundle --dart-define=BS_API_BASE=https://api.thetelescope.net
+```
+
+## Firebase Push Notifications
+
+Push notifications use Firebase Cloud Messaging. The Firebase configuration lives in `app/lib/firebase_options.dart` and is loaded during app startup in `main.dart`:
+
+```dart
+// app/lib/main.dart
+try {
+  await Firebase.initializeApp(
+    options: DefaultFirebaseOptions.currentPlatform,
+  );
+} catch (_) {
+  // Firebase not yet configured — push notifications will be unavailable.
+}
+```
+
+The graceful catch means the app runs normally without push support when Firebase is not configured — useful during local development.
+
+To enable push notifications:
+
+1. Create a Firebase project at [console.firebase.google.com](https://console.firebase.google.com)
+2. Add iOS and Android apps to the project
+3. Download `google-services.json` (Android) and `GoogleService-Info.plist` (iOS)
+4. Run `flutterfire configure` to regenerate `app/lib/firebase_options.dart`
+5. Place the platform files in `app/android/app/` and `app/ios/Runner/` respectively
+
+<Warning>
+  Never commit `app/lib/firebase_options.dart` containing real Firebase credentials to a
+  public repository. Add it to `.gitignore` and distribute it through a secrets manager or
+  CI environment variable injection.
+</Warning>
+
+## App Architecture
+
+The app follows a provider-based state architecture. The key files are:
+
+```
+app/lib/
+  config.dart              API base URL resolution (BS_API_BASE / API_BASE dart-define)
+  main.dart                Entry point — Firebase init, AppState bootstrap, auth gate
+  theme.dart               Dark theme (enlarged type scale, high-contrast palette)
+  api/
+    api_client.dart        Typed wrapper over all /api/v1/* member endpoints
+    auth_store.dart        Bearer token persistence via shared_preferences
+  models/models.dart       Member, Node, MemberStats, Observation, AppNotification, …
+  state/app_state.dart     Session + member state (ChangeNotifier, provided app-wide)
+  screens/
+    login_screen.dart      Sign in / register
+    home_screen.dart       Tab shell (NavigationBar) + alerts sheet
+    dashboard_tab.dart     "Tonight": live status, plan timeline, Aladin field preview
+    nodes_tab.dart         Telescope list + claim-a-node sheet
+    observations_tab.dart  Photometric history + night summaries
+    notifications_tab.dart Alert inbox + mark-read
+    help_tab.dart          Contact links, AI assistant chat, node diagnostics
+    more_tab.dart          Science program suggestions, settings, about
+  services/push_service.dart  Firebase token registration + notification tap routing
+  widgets/
+    async_view.dart        Loading / error / empty state + pull-to-refresh helper
+    aladin_sky.dart        Aladin Lite WebView widget for sky field preview
+    glass.dart             Glassmorphism panel primitives
+```
+
+### API Client
+
+`app/lib/api/api_client.dart` wraps every member-authenticated cloud endpoint. All methods return typed Dart objects and throw `ApiException` on non-2xx responses. A status code of 401 signals an expired token; `AppState.handleAuthError()` catches this and signs the member out.
+
+```dart
+// Examples from api_client.dart
+Future<List<Node>> nodes()                          // GET /api/v1/me/nodes
+Future<List<Observation>> observations({...})       // GET /api/v1/me/observations
+Future<HelpChatResponse> helpChat(String message)  // POST /api/v1/me/help/chat
+Future<void> claimNode(String nodeId, String key)  // POST /api/v1/me/nodes/<id>
+Future<void> suggestScienceProgram({...})           // POST /api/v1/me/science-program-suggestions
+```
+
+### Auth Store
+
+`app/lib/api/auth_store.dart` persists the bearer token using `shared_preferences`. The token is loaded during `AppState.bootstrap()` at startup, which resolves the `_AuthGate` to either `LoginScreen` or `HomeScreen`.
+
+## Deployment
+
+Production deployments are handled by Railway via `scripts/deploy-api.sh`, which builds the Flutter web output and includes it in the cloud server deploy. GitHub Actions workflows watch the `app/` and `cloud/` directories and trigger deploys on push to `main`.
+
+To point the deployed app at the production API:
+
+```bash
+flutter build web
+# Web build auto-derives the API base from the page origin in production.
+# No dart-define needed when the web app and API are on the same domain.
+```
+
+For native (iOS/Android) builds targeting production, no `dart-define` is required — `AppConfig` falls back to `https://api.thetelescope.net` when running on a device.
+
+```yaml
+# Example GitHub Actions step for a web deploy
+- name: Build Flutter web
+  run: |
+    cd app
+    flutter pub get
+    flutter build web
+```

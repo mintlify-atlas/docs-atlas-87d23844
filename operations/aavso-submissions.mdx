@@ -1,0 +1,235 @@
+---
+title: "Submit Photometry to AAVSO WebObs Step by Step"
+sidebarTitle: "AAVSO Submissions"
+description: "Configure AAVSO credentials, preview submission batches with the admin CLI, and submit calibrated photometry to AAVSO WebObs — including dry-run testing and error diagnosis."
+---
+
+The Telescope Net cloud server accumulates calibrated photometry measurements from every active node, batches them under the network's AAVSO observer code, and POSTs the resulting Extended File Format document to the AAVSO WebObs API. No manual formatting or uploading is required — once your credentials are configured, the pipeline handles everything from quality filtering through audit-trail archiving. This page walks you through configuring those credentials, verifying the output format, and submitting your first live batch.
+
+## Prerequisites
+
+Before submitting to AAVSO you need:
+
+- An **AAVSO observer code** (OBSCODE) — register free at [aavso.org](https://www.aavso.org/register-as-observer)
+- Your **AAVSO username and password** — the same credentials you use to log in to the AAVSO website
+- The cloud server running with at least one active node that has delivered measurements
+
+## First Submission — Step by Step
+
+<Steps>
+  <Step title="Set AAVSO credentials in cloud/config.yaml">
+    Open `cloud/config.yaml` and fill in your observer code and login credentials. The username and password fields support environment variable expansion — you can set them directly or reference env vars:
+
+    ```yaml
+    aavso:
+      observer_code: 'MXXX'           # your AAVSO OBSCODE
+      username: '${AAVSO_USERNAME}'   # or a literal string
+      password: '${AAVSO_PASSWORD}'
+      dry_run: false
+    ```
+
+    The `observer_code` field is required for any submission. The `username` and `password` fields are required to POST live data to WebObs.
+  </Step>
+
+  <Step title="Verify the Extended File Format (dry run)">
+    Run `check-aavso` to confirm credentials are configured and to print a formatted test observation. No data is submitted at this stage.
+
+    ```bash
+    python3 scripts/manage.py check-aavso
+    ```
+
+    The command prints a synthetic observation for the known variable BW Tau with your observer code filled in, so you can verify the header and data fields look correct before touching live data.
+  </Step>
+
+  <Step title="Check active nodes">
+    Confirm the network has registered nodes that are sending measurements:
+
+    ```bash
+    python3 scripts/manage.py status
+    ```
+
+    The output shows node count, online/offline status, the measurement queue size, and the AAVSO credential summary. Look for at least one node listed as `ONLINE` and a non-zero pending measurement count.
+  </Step>
+
+  <Step title="Trigger alert ingestion">
+    Force the pipeline to ingest new variable-star alerts, score all targets, and regenerate observation plans immediately instead of waiting for the hourly background loop:
+
+    ```bash
+    python3 scripts/manage.py ingest
+    ```
+
+    The command reports new/updated/expired alerts per source, the number of node×target pairs scored, and the number of plans generated.
+  </Step>
+
+  <Step title="Run a night's observations">
+    Connect a node agent to its Seestar telescope and allow it to execute the night's observation plan. The node uploads each photometry result to the cloud as measurements are completed. You do not need to do anything manually during the night.
+  </Step>
+
+  <Step title="Preview the AAVSO batch (dry run)">
+    Before committing to a live POST, inspect the exact Extended File Format document that would be sent to WebObs:
+
+    ```bash
+    python3 scripts/manage.py batch
+    ```
+
+    The command runs the batch pipeline with `dry_run: true`, saves the formatted file to `cloud_data/aavso_batches/`, and prints the first 40 lines to the terminal. No data is POSTed to AAVSO.
+  </Step>
+
+  <Step title="Submit live">
+    Once you are satisfied with the batch preview, submit to AAVSO WebObs:
+
+    ```bash
+    python3 scripts/manage.py submit
+    ```
+
+    This command forces `dry_run: false` for this run only — it does **not** modify `config.yaml`. The batch is POSTed to `https://www.aavso.org/apps/webobs/submit/` and the raw HTTP response is saved alongside the submission file.
+  </Step>
+
+  <Step title="Verify the result">
+    Run `status` again to confirm measurements have moved from the pending queue to submitted:
+
+    ```bash
+    python3 scripts/manage.py status
+    ```
+
+    The "Recent AAVSO batches" table shows the submission timestamp, status, observation count, and accepted/rejected counts for the last five batches.
+  </Step>
+</Steps>
+
+<Warning>
+The `submit` command forcibly sets `dry_run: false` for its run, regardless of the `dry_run` setting in `config.yaml`. If you want to test the format without live POSTing, always use `batch` instead of `submit`.
+</Warning>
+
+---
+
+## Admin CLI Reference
+
+```bash
+python3 scripts/manage.py [--config PATH] <command>
+```
+
+| Command | Description |
+|---------|-------------|
+| `status` | Node count, measurement queue depth, AAVSO batch history, config check |
+| `ingest` | Trigger alert ingestion + scoring + plan regeneration immediately |
+| `batch` | Dry-run preview of the pending AAVSO batch (prints format, does **not** POST) |
+| `submit` | Live AAVSO submission (ignores `config.yaml` `dry_run` setting) |
+| `check-aavso` | Verify credentials config, print a formatted test observation |
+| `nights` | Generate or backfill night summaries for all active nodes |
+
+### `generate-code` sub-command
+
+```bash
+python3 scripts/manage.py generate-code [options]
+
+  --count N           Number of codes to generate (default 1, max 100)
+  --user USER_ID      Pre-link codes to a specific member account (optional)
+  --expires-days N    Days until the codes expire (default 90)
+```
+
+Use `--config PATH` with any command to point at a non-default config file:
+
+```bash
+python3 scripts/manage.py --config /etc/telescopenet/config.yaml status
+```
+
+---
+
+## AAVSO Extended File Format
+
+Each submission is a plain-text document following the [AAVSO Extended File Format](https://www.aavso.org/aavso-extended-file-format) spec. The pipeline generates one document per batch run and saves it before any POST attempt.
+
+```
+#TYPE=Extended
+#OBSCODE=[network observer code]
+#SOFTWARE=The Telescope Net Node v1
+#DELIM=,
+#DATE=BJD
+#OBSTYPE=CCD
+#NAME,DATE,MAG,MERR,FILT,TRANS,MTYPE,CNAME,CMAG,KNAME,KMAG,AMASS,GROUP,CHART,NOTES
+```
+
+**Field definitions:**
+
+| Field | Value | Notes |
+|-------|-------|-------|
+| `NAME` | Target name from VSX | Commas replaced with spaces |
+| `DATE` | Barycentric Julian Date (BJD_TCB) | 6 decimal places |
+| `MAG` | Calibrated magnitude | 3 decimal places |
+| `MERR` | Magnitude uncertainty | Includes Poisson + zero-point scatter |
+| `FILT` | Filter name | e.g. `CV` (clear visual) for Seestar |
+| `TRANS` | `NO` | Not transformed to standard photometric system |
+| `MTYPE` | `DIFF` | Differential photometry |
+| `CNAME` | `ENSEMBLE` | Ensemble of comparison stars used |
+| `CMAG` | `na` | No single comparison star magnitude |
+| `KNAME` | `na` | No check star |
+| `KMAG` | `na` | |
+| `AMASS` | Airmass | 2 decimal places; `na` if not available |
+| `GROUP` | `na` | |
+| `CHART` | VSP chart ID or `na` | Set via `aavso.chart_id` in config |
+| `NOTES` | Pipeline diagnostics | `fwhm`, `snr`, `comp`, `zp_scatter`, `node`, `quality`, `fits` |
+
+---
+
+## Quality Gates
+
+The pipeline applies automatic quality gates before including a measurement in a submission batch. A measurement must pass all of the following checks:
+
+<CardGroup cols={2}>
+  <Card title="SNR > 20" icon="chart-line">
+    Signal-to-noise ratio must exceed 20. Low-SNR measurements indicate poor sky conditions, thin cloud, or target at the edge of detection.
+  </Card>
+  <Card title="Uncertainty < 0.3 mag" icon="magnifying-glass">
+    Magnitude uncertainty (Poisson + zero-point scatter) must be below the AAVSO quality ceiling of 0.30 mag.
+  </Card>
+  <Card title="≥ 3 comparison stars" icon="star">
+    Ensemble differential photometry requires at least three comparison stars. The pipeline queries AAVSO VSP first, falling back to Gaia DR3.
+  </Card>
+  <Card title="Airmass < 3.0" icon="cloud">
+    Observations at very high airmass suffer heavy atmospheric extinction and colour-dependent errors. Hard cut at 3.0.
+  </Card>
+</CardGroup>
+
+Measurements flagged `poor` are skipped by default. To include them, set `aavso.submit_poor_quality: true` in `config.yaml`.
+
+**Phase 0 success criterion:** One observation accepted by AAVSO with magnitude agreeing within **0.15 mag** of the known value for the target.
+
+---
+
+## Audit Trail
+
+Every submission — whether dry run, live POST, or rejected — generates a full audit trail under the `aavso.audit_dir` directory (default: `cloud_data/aavso_batches/`):
+
+```
+cloud_data/aavso_batches/
+└── YYYY-MM-DD/
+    ├── <target>_<bjd>.txt            # formatted Extended File Format document
+    ├── <target>_<bjd>_response.txt   # raw HTTP response from WebObs
+    └── <target>_<bjd>_record.json    # full metadata: measurement, status, accepted/rejected
+```
+
+The `_response.txt` file contains the raw HTML or JSON returned by WebObs and is the first place to look when a submission is rejected.
+
+<Tip>
+When a submission is rejected, open the corresponding `_response.txt` file. AAVSO WebObs typically returns a descriptive error message. Common causes include: invalid observer code, target name not found in AAVSO VSX, or date out of range. The `check-aavso` command validates the format before any live submission attempt.
+</Tip>
+
+---
+
+## REST API Equivalents
+
+If you need to trigger ingestion or replanning programmatically (for example, from a cron job or CI script), use the admin API endpoints directly:
+
+```bash
+# Trigger alert ingestion + scoring (equivalent to `manage.py ingest`)
+curl -X POST \
+     -H "X-Admin-Key: your-admin-key" \
+     https://api.thetelescope.net/api/v1/admin/ingest
+
+# Trigger rescoring + plan regeneration only
+curl -X POST \
+     -H "X-Admin-Key: your-admin-key" \
+     https://api.thetelescope.net/api/v1/admin/replan
+```
+
+The admin key is configured as `server.admin_key` in `cloud/config.yaml` (typically sourced from the `CLOUD_ADMIN_KEY` environment variable).

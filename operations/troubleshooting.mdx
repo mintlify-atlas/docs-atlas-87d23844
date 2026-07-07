@@ -1,0 +1,245 @@
+---
+title: "Troubleshoot Node Agent and Cloud Server Issues"
+sidebarTitle: "Troubleshooting"
+description: "Diagnose and fix common issues: ALPACA connection failures, plate-solve errors, AAVSO submission rejections, photometry quality problems, and weight-tuning monitor failures."
+---
+
+This page covers the most common failure modes for The Telescope Net Node Agent and cloud server. Issues are grouped by subsystem. Start with the quick diagnostic checklist below to rule out the most frequent causes before diving into specific accordion sections.
+
+## Quick Diagnostic Checklist
+
+<Steps>
+  <Step title="Confirm the Seestar is on and on the same network">
+    The node agent discovers the Seestar via UDP broadcast on port 32227. Power the Seestar on and confirm it is connected to the same WiFi network as the agent host. Open the Seestar app and confirm the telescope shows as connected there before starting the agent.
+  </Step>
+  <Step title="Check the node dashboard">
+    Navigate to `http://localhost:5173` and inspect the status panel. The dashboard shows per-device connection state, the current observation plan, the last photometry result, and the tail of the agent log. Most issues are visible here without touching the command line.
+  </Step>
+  <Step title="Check the agent log">
+    The full log is at `data/logs/node_agent.log` (Windows/Linux installs) or in the dashboard log tab. Filter for `ERROR` and `WARNING` lines first — most failures log a specific message at these levels.
+  </Step>
+  <Step title="Verify config.yaml">
+    Confirm that `observer.latitude` and `observer.longitude` are set (non-zero), that `image_watcher.watch_path` points to the mounted Seestar SMB share, and that `cloud.activation_code` is present if cloud integration is enabled.
+  </Step>
+  <Step title="Restart the Seestar firmware if ALPACA is unresponsive">
+    The Seestar ALPACA HTTP server can wedge independently of the core firmware. If the telescope appears online in the Seestar app but the agent cannot connect, use **Settings → Restart** in the Seestar app to perform a full firmware reboot (not just an app relaunch).
+  </Step>
+</Steps>
+
+---
+
+## ALPACA / Telescope Connection
+
+<Accordion title='"No ALPACA servers found"'>
+  The node agent discovers ALPACA devices by sending a UDP broadcast to port 32227 on the local subnet. This fails when:
+
+  - **Seestar not powered on.** The telescope must be on and fully booted. The Seestar app takes 30–60 seconds to initialise after power-on.
+  - **Different subnet.** The agent host and the Seestar must be on the same Layer 2 network. A guest WiFi VLAN, AP isolation, or a double-NAT setup will block UDP broadcast. Verify with:
+
+    ```bash
+    # macOS / Linux — listen for Seestar UDP discovery packets
+    tcpdump -i en0 udp port 32227
+    ```
+
+    If nothing appears within 60 seconds of powering on the Seestar, the packets are being dropped by the network.
+
+  - **macOS firewall blocking Python.** On macOS, the first time Python tries to open a UDP socket, the system may prompt to allow it. If you dismissed that prompt, go to **System Preferences → Privacy & Security → Firewall → Firewall Options** and add Python to the allowed list.
+</Accordion>
+
+<Accordion title='"ErrorNumber 1: Device not connected"'>
+  The ALPACA server on the Seestar responded to the discovery broadcast, but the device inside the firmware is not yet initialised. This typically means the Seestar app has not been opened since the last power cycle.
+
+  **Fix:** Open the Seestar app and wait for it to show the telescope as connected before starting the node agent. The ALPACA server initialises device state when the app connects.
+</Accordion>
+
+<Accordion title='"Host is down" despite Seestar app showing connected'>
+  <Warning>
+    This is a silent failure mode: the Seestar app talks directly to the firmware over a separate channel, so the app can show "connected" while the ALPACA HTTP service is completely unresponsive. Any observation attempt will fail silently until the firmware is rebooted.
+  </Warning>
+
+  The Seestar ALPACA HTTP server is a separate process from the core firmware. It can wedge (stop responding to HTTP requests) while the firmware and the Seestar app remain fully operational. This is typically caused by:
+
+  - A network hiccup that disconnected the ALPACA server's listening socket
+  - A firmware assert during a previous imaging session
+  - Extended uptime without a power cycle
+
+  **Recovery:** Open the Seestar app → **Settings → Restart**. This performs a full firmware reboot — not just an app relaunch. Wait 60 seconds for the firmware to come back up before restarting the node agent.
+</Accordion>
+
+<Accordion title='"ErrorNumber 1024: Method Unpark is not implemented"'>
+  The Seestar S50 ALPACA driver does not implement the `Unpark` method. The node dashboard's Unpark button has no effect on this device.
+
+  **Fix:** Unpark the telescope from within the Seestar app. The telescope must be unparked in the app before the node agent can issue slew commands.
+
+  This is a known Seestar S50 ALPACA driver limitation, not a bug in the node agent.
+</Accordion>
+
+<Accordion title='"CoverCalibrator connect failed: 400 Client Error"'>
+  The node agent attempts to connect to a CoverCalibrator device at ALPACA index 0 on startup. The Seestar S50 has no cover calibrator, so the endpoint returns a 400 error.
+
+  This is **non-fatal** — the agent continues operating normally. To suppress the warning, add the following to `config.yaml`:
+
+  ```yaml
+  devices:
+    covercalibrator:
+      enabled: false
+  ```
+</Accordion>
+
+---
+
+## Plate Solving / Photometry
+
+<Accordion title="Plate solve fails on every image">
+  The photometry pipeline runs ASTAP to compute a WCS solution before measuring the target position. If ASTAP fails, photometry cannot run.
+
+  **Causes and fixes:**
+
+  1. **ASTAP not found on PATH.** Set the full binary path in `config.yaml`:
+     ```yaml
+     photometry:
+       astap_path: /usr/local/bin/astap   # or C:\Program Files\astap\astap.exe
+     ```
+     Installers bundle ASTAP automatically; development setups require a manual install from [hnsky.org/astap.htm](https://www.hnsky.org/astap.htm).
+
+  2. **G18 star catalogue not installed.** ASTAP requires the G18 catalogue to plate-solve Seestar images. Download the catalogue from the ASTAP site and install it in the default catalogue directory. Without the catalogue, ASTAP returns immediately with no solution.
+
+  3. **Search radius too small for wide-field images.** If the image is very wide field or the initial pointing is uncertain, increase the search radius:
+     ```yaml
+     photometry:
+       astap_search_radius: 20   # degrees (default: 10)
+     ```
+</Accordion>
+
+<Accordion title='Photometry quality always flagged as "poor"'>
+  The pipeline assigns `quality_flag: poor` when one or more of these thresholds are not met: SNR > 20, uncertainty < 0.30 mag, ≥ 3 comparison stars. Poor measurements are skipped by AAVSO submission by default.
+
+  **Common causes:**
+
+  - **Low SNR.** Increase the per-frame exposure time. For a Seestar S50, typical good SNR on a 12th-magnitude target requires at least 60–120 seconds of total integration. Check sky conditions — thin cloud or poor seeing dramatically reduces SNR.
+
+  - **Too few comparison stars.** If the field has fewer than three AAVSO VSP comparison stars, the pipeline falls back to Gaia DR3. Verify that `photometry.field_radius` is large enough to include comparison stars, and that `photometry.mag_limit` is not set too faint for the sky background.
+
+  - **Large zero-point scatter.** High `zp_scatter` in the NOTES field indicates the comparison stars are inconsistent — usually caused by rapidly changing clouds or poor atmospheric transparency. The ZP scatter contributes directly to the reported uncertainty. There is no fix except waiting for better conditions.
+</Accordion>
+
+---
+
+## AAVSO Submission
+
+<Accordion title="Submission rejected by WebObs">
+  When a live submission is rejected, the raw WebObs error message is saved to the audit directory:
+
+  ```
+  cloud_data/aavso_batches/YYYY-MM-DD/*_response.txt
+  ```
+
+  Open the `_response.txt` file — AAVSO WebObs typically returns a descriptive HTML error. Common causes:
+
+  | Cause | Symptom in response | Fix |
+  |-------|--------------------|----|
+  | Invalid observer code | "OBSCODE not found" | Verify `aavso.observer_code` matches exactly what AAVSO issued |
+  | Target not in VSX | "star name not recognized" | Check the target name against [AAVSO VSX](https://www.aavso.org/vsx/); aliases may differ |
+  | Date out of range | "date out of valid range" | Verify the BJD value is correct; clock skew on the node host can corrupt timestamps |
+  | Auth failure | Login redirect page | Verify `aavso.username` and `aavso.password` match current AAVSO website credentials |
+
+  Use `python3 scripts/manage.py check-aavso` to validate credentials and format before a live submission, and `python3 scripts/manage.py batch` to preview the exact text that will be POSTed.
+</Accordion>
+
+---
+
+## Safety Manager
+
+<Accordion title="Dawn parking not triggering">
+  The SafetyManager parks the telescope at astronomical dawn to prevent daytime observations. This requires accurate location data to calculate the dawn time.
+
+  **Fixes:**
+
+  1. **Location not configured.** Both `safety.observer.latitude` and `safety.observer.longitude` must be non-zero decimal degree values. A value of `0.0` places the observer at the equator/prime meridian intersection and produces incorrect dawn calculations.
+
+  2. **Sun stays below −18° all night (high-latitude summer).** At mid-to-high latitudes in summer, the sun may never reach astronomical twilight (−18° altitude), so `dawn_type: astronomical` never triggers. Switch to nautical twilight:
+     ```yaml
+     safety:
+       dawn_type: nautical   # sun reaches -12° (less extreme than astronomical -18°)
+     ```
+     Options: `astronomical` (−18°), `nautical` (−12°), `civil` (−6°).
+</Accordion>
+
+<Accordion title="SafetyManager stuck in unsafe state after reconnect">
+  <Warning>
+    If the SafetyManager enters an unsafe state due to a lost connection, it does **not** self-clear after reconnect. The node will refuse to execute observations until `dashboard.py` is restarted. If this happens during a clear night, the entire session is lost.
+  </Warning>
+
+  The SafetyManager monitors the Seestar connection via a heartbeat. If contact is lost for longer than `safety.disconnect_timeout` (default 600 seconds), it triggers an emergency park and enters an `unsafe` state. The unsafe state persists until the node agent process restarts.
+
+  **Recovery:** Restart `dashboard.py` (or the `TelescopeNetNode` service on Windows/macOS/Linux installs). The manager initialises to a safe state on startup and re-attaches cleanly.
+
+  **Root causes:**
+  - Seestar WiFi drop (most common)
+  - Seestar app crash causing ALPACA to stop responding
+  - Host machine sleeping despite sleep prevention configuration
+
+  **Prevention:**
+  - Improve WiFi signal between the host machine and the Seestar
+  - Verify that sleep prevention is active (visible in the node dashboard)
+  - Consider increasing `safety.disconnect_timeout` if brief WiFi drops are expected
+</Accordion>
+
+---
+
+## Weight Tuning Monitor
+
+<Accordion title="Weight-tuning monitor is not running">
+  The monitor is disabled by default and runs only once per day. Work through this checklist:
+
+  1. **API key set?**
+     ```bash
+     echo $ANTHROPIC_API_KEY
+     ```
+     The key must be non-empty in the environment where the cloud server process runs.
+
+  2. **Enabled in config?** Confirm `tuning.enabled: true` in `cloud/config.yaml`.
+
+  3. **Timing:** The monitor runs during the nightly maintenance window (typically 2–3 AM UTC). It does not run on demand. Check the cloud server logs the morning after enabling.
+
+  4. **Check logs:** Search the cloud server log for the `cloud.tuning` logger:
+     ```
+     "Tuning disabled — skipping nightly weight review"   → enabled is false
+     "Tuning skipped — only N nights of data (need M)"   → insufficient history
+     "Tuning skipped — only N measurements (need M)"     → insufficient data volume
+     "Nightly tuning failed (weights unchanged): ..."    → exception — check the message
+     ```
+
+  5. **Insufficient data:** Both `min_nights_for_tuning` (default 7) and `min_measurements` (default 30) must be satisfied within the `lookback_days` window before the first tuning run.
+</Accordion>
+
+<Accordion title="Weight changes have no effect on the observation plan">
+  Weight changes in `tuning_state` take effect only when the replan loop next runs (every 120 minutes by default). A change made at 2 AM may not affect plans until ~4 AM.
+
+  **Force an immediate rescore:**
+  ```bash
+  curl -X POST \
+       -H "X-Admin-Key: your-admin-key" \
+       https://api.thetelescope.net/api/v1/admin/replan
+  ```
+
+  **Confirm the weights were actually updated:**
+  ```bash
+  curl -H "X-Admin-Key: your-admin-key" \
+       https://api.thetelescope.net/api/v1/admin/tuning
+  ```
+
+  Check `active_weights` and `last_tuning_run` in the response. If `last_tuning_run` is old or `active_weights` matches the seed values from `config.yaml`, the monitor has not run successfully yet.
+</Accordion>
+
+<Accordion title="Claude API errors during tuning">
+  All Claude API errors are caught and logged. The weights are left unchanged on any error.
+
+  | HTTP Status | Cause | Resolution |
+  |-------------|-------|-----------|
+  | 429 | Anthropic rate limit | Reduce call frequency by increasing `tuning.lookback_days`; or temporarily set `tuning.enabled: false` |
+  | 401 | API key invalid or quota exhausted | Verify `ANTHROPIC_API_KEY` is correct and the Anthropic account has remaining credits |
+  | Content policy | Evidence brief triggers a refusal (rare) | The apply step is skipped; a warning is logged; check `cloud.tuning` logger output |
+
+  To see the error details, check the cloud server log for `cloud.tuning` logger entries at `ERROR` level.
+</Accordion>

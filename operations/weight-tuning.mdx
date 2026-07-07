@@ -1,0 +1,238 @@
+---
+title: "Claude Weight Tuning Monitor for Observability Scoring"
+sidebarTitle: "Weight Tuning"
+description: "Configure and monitor the optional Claude-powered weight tuning system that nightly adapts observability scoring weights based on observation outcomes — with full audit trail and rollback."
+---
+
+The Telescope Net's scheduling engine assigns observations to telescopes using a composite score that blends six observability sub-weights. By default these weights are static — they stay at the values set in `cloud/config.yaml` forever. When you opt in to the weight tuning monitor, a nightly advisory process reads the last N nights of real observation outcomes, identifies which weights appear misaligned with actual results, and proposes small evidence-justified adjustments. The hot path — alert ingestion, scoring, and plan generation — stays 100% procedural code with no LLM calls and no added latency. Claude is used only in this advisory monitor, and only once per night.
+
+## Observability Sub-Weights
+
+The scoring engine blends six factors into an `observe` score for each (target, node, time-slot) triple. These sub-weights control how heavily each factor influences target assignment:
+
+```json
+{
+  "light_pollution": 0.20,
+  "weather":         0.25,
+  "moon":            0.15,
+  "airmass":         0.15,
+  "window":          0.15,
+  "telescope":       0.10
+}
+```
+
+| Weight | Controls |
+|--------|----------|
+| `light_pollution` | Penalty from sky background brightness (mpsas / Bortle). Nodes with darker skies get a stronger preference for faint targets. |
+| `weather` | Historical clearness likelihood at the node's location. High weight means uncertain weather blocks more scheduling than other factors. |
+| `moon` | Combined lunar illumination and angular separation from the target. Raised when bright-moon measurements show significantly higher uncertainty. |
+| `airmass` | Atmospheric extinction and altitude curve. Targets observed at high airmass (low altitude) incur stronger penalties when this weight is high. |
+| `window` | Hours per night the target is above the minimum altitude. Short windows need a higher weight to prevent them being crowded out by longer-window targets. |
+| `telescope` | Hardware capability match: aperture, filter set, tier, and magnitude limits. Raised when lower-tier nodes are systematically failing their assigned targets. |
+
+The weights must sum to 1.0 and are renormalized automatically whenever changes are applied.
+
+---
+
+## How Tuning Works
+
+The nightly monitor runs in three procedural steps after the daily maintenance window completes (typically 2–3 AM UTC):
+
+<Steps>
+  <Step title="Gather evidence">
+    The monitor queries the last N nights of measurements from the database — no LLM involved. For each sub-weight it computes a directly relevant outcome signal:
+
+    - **light_pollution** → outlier rate for faint (≥14 mag) vs bright targets
+    - **weather** → plan completion rate: targets planned vs. targets actually observed
+    - **moon** → mean uncertainty under bright moon (≥50% illumination) vs. dark moon
+    - **airmass** → mean uncertainty at high airmass (≥1.5) vs. low airmass
+    - **window** → mean observability score and plan completion rate
+    - **telescope** → good-data fraction broken down by node tier
+
+    Each signal is reported with its own sample count so the monitor can discount weak evidence.
+  </Step>
+
+  <Step title="Propose adjustments">
+    The evidence brief and current weights are sent to Claude in a single API call. The system prompt instructs Claude to reason factor-by-factor, raise weights only when a signal is both poor and well-sampled, and make small evidence-justified moves — not sweeping changes. The response is structured JSON (validated against a schema) containing proposed values for all six weights plus a rationale string.
+  </Step>
+
+  <Step title="Apply with safeguards">
+    All application logic is procedural — Claude's proposed values are never applied raw:
+
+    1. Each weight is clamped to a maximum change of ±`max_delta_per_night` (default 5%) from its current value
+    2. The full weight set is renormalized to sum exactly 1.0
+    3. If no weight moved more than `min_weight_change` (default 0.5%), the change is considered immaterial and discarded silently
+    4. Otherwise the new weights are persisted to the `tuning_state` table with a full audit row in `weight_history` including the old values, new values, rationale, and Claude model used
+    5. Admin users receive an in-app notification summarising the change
+  </Step>
+</Steps>
+
+The new weights take effect on the **next** replan cycle (every 120 minutes by default) — no server restart required. `scoring.score_all()` reads live weights from the `tuning_state` table on every run.
+
+---
+
+## Configuration
+
+Enable and configure the tuning monitor in `cloud/config.yaml`:
+
+```yaml
+tuning:
+  enabled: false                # set true to enable Claude-powered tuning
+  model: claude-opus-4-8        # Claude model for advisory proposals
+  lookback_days: 14             # analyze the last N nights of observations
+  max_delta_per_night: 0.05     # hard cap: no weight moves more than ±5% per night
+  min_nights_for_tuning: 7      # require ≥ 7 nights of historical data before first run
+  min_measurements: 30          # require ≥ 30 measurements before first run
+  min_weight_change: 0.005      # skip apply/notify if no weight moves > 0.5%
+```
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `enabled` | `false` | Master on/off switch. Ships disabled; behavior is identical to static weights when `false`. |
+| `model` | `claude-opus-4-8` | Claude model used for advisory proposals. Set `claude-sonnet-4-6` to reduce API cost. |
+| `lookback_days` | `14` | Number of past nights whose outcomes are analysed in each run. Larger values mean more stable evidence but slower adaptation. |
+| `max_delta_per_night` | `0.05` | Trust-region cap: no single weight can change by more than this fraction (0.05 = 5%) in one night, regardless of what Claude proposes. |
+| `min_nights_for_tuning` | `7` | Tuning is skipped if fewer than this many nights of data exist. Prevents premature adjustments during beta rollout. |
+| `min_measurements` | `30` | Tuning is skipped if fewer than this many measurements exist in the lookback window. |
+| `min_weight_change` | `0.005` | If the maximum change across all weights after clamping is smaller than this, the run is treated as a no-op — no DB write, no notification. |
+
+### Required Environment Variable
+
+```bash
+export ANTHROPIC_API_KEY="sk-ant-..."
+```
+
+The `ANTHROPIC_API_KEY` must be set in the environment where the cloud server runs. Alternatively, set `tuning.api_key` directly in `config.yaml` (not recommended for production). If the key is absent, the monitor silently skips its run and leaves all weights unchanged.
+
+<Warning>
+Tuning runs as part of the daily maintenance window, typically 2–3 AM UTC. Setting `enabled: true` does **not** trigger an immediate run — the first adjustment will happen overnight.
+</Warning>
+
+<Note>
+Both `min_measurements` (default 30) and `min_nights_for_tuning` (default 7) must be satisfied before the monitor makes its first weight change. On a fresh installation with no observation history, expect at least one to two weeks before tuning activates.
+</Note>
+
+---
+
+## Database Tables
+
+The tuning system uses two database tables, both created automatically on cloud server startup:
+
+| Table | Purpose | Key Columns |
+|-------|---------|-------------|
+| `tuning_state` | Single row storing the currently active observability weights | `id`, `obs_weights` (JSON), `updated_at` |
+| `weight_history` | Append-only audit trail of every weight change | `id`, `changed_at`, `old_weights`, `new_weights`, `rationale`, `evidence_digest`, `model`, `applied` |
+
+Config file values under `scoring.observability_weights` serve as **seed values only** — they initialise the `tuning_state` row on first use. After that, live weights are always read from the database.
+
+---
+
+## Monitoring Endpoints
+
+```bash
+# Get current live weights, last run timestamp, and recent change history
+curl -H "X-Admin-Key: your-admin-key" \
+     https://api.thetelescope.net/api/v1/admin/tuning
+```
+
+**Response fields:**
+
+| Field | Description |
+|-------|-------------|
+| `active_weights` | The six currently active observability sub-weights read from `tuning_state` |
+| `last_tuning_run` | ISO 8601 timestamp of the most recent monitor run |
+| `weight_history` | Array of recent audit rows (old weights, new weights, rationale, model) |
+| `recent_changes` | Subset of `weight_history` showing only rows where weights actually changed |
+
+```bash
+# Rollback to a prior weight set by weight_history row ID
+curl -X POST \
+     -H "X-Admin-Key: your-admin-key" \
+     -H "Content-Type: application/json" \
+     -d '{"rollback_to_id": 5}' \
+     https://api.thetelescope.net/api/v1/admin/tuning/rollback
+```
+
+Rollback is immediate and writes its own audit row, so the history is never rewritten — only extended. The rolled-back weights take effect on the next replan cycle.
+
+You can also inspect tuning state from the admin CLI:
+
+```bash
+python3 scripts/manage.py status
+# Includes tuning section: enabled/disabled, last run, current weights
+```
+
+---
+
+## Three-Ring Tuning Architecture (CHORUS)
+
+When the CHORUS network optimizer is active, the weight tuning system extends to three rings of automation at different time scales and risk levels:
+
+<CardGroup cols={3}>
+  <Card title="Ring 0 — Nightly Calibrations" icon="gear">
+    Fully LLM-free. Runs every night: forecast reliability recalibration, photometric uncertainty prediction, hazard rate updates. No Claude, no approval needed.
+  </Card>
+  <Card title="Ring 1 — LLM-Advised Hyperparameters" icon="sliders">
+    The weight tuning monitor described on this page. Adjusts observability sub-weights, composite weights, and CHORUS coordination knobs. CHORUS-specific parameters are additionally gated by a deterministic counterfactual backtest before being applied.
+  </Card>
+  <Card title="Ring 2 — Weekly Structural Proposals" icon="diagram-project">
+    Weekly LLM review of target class templates and scheduling strategies. Proposals are schema-validated and backtested before any change is applied. Not yet active in Phase 0.
+  </Card>
+</CardGroup>
+
+In Ring 1, any proposed change to CHORUS hyperparameters (e.g. `scarcity_gamma`, `exploration_beta`) must win a deterministic replay of recent archived nights against realized outcomes before being applied. The observability sub-weights covered on this page do not require the backtest gate — only the CHORUS-specific parameter group does.
+
+---
+
+## Key Safeguards
+
+- **Opt-in by default.** `tuning.enabled` ships as `false`. Nothing changes until an operator sets it to `true`.
+- **Hot path untouched.** Alert ingestion, scoring, and plan generation are 100% procedural code. Claude is never called in any latency-sensitive path.
+- **Audited.** Every weight change — including changes from rollback — writes an immutable row to `weight_history`.
+- **Rollback in one API call.** Any weight set from history can be restored instantly without touching `config.yaml` or restarting the server.
+- **Changes delayed to next replan.** New weights apply only when the replan loop next runs (up to 120 minutes), so there is no risk of mid-session disruption.
+
+---
+
+## Troubleshooting
+
+<Accordion title="Weight-tuning monitor is not running">
+  Check the following in order:
+
+  1. **API key present?** Run `echo $ANTHROPIC_API_KEY` in the environment where the cloud server runs. The key must be non-empty.
+  2. **Enabled in config?** Confirm `tuning.enabled: true` in `cloud/config.yaml`.
+  3. **Timing:** Tuning is a daily task that runs during the maintenance window (typically 2–3 AM UTC). It will not run on demand — check again after the next window.
+  4. **Check logs:** The `cloud.tuning` logger emits detailed output. Search for `"Tuning skipped"` or `"Nightly tuning failed"` to identify the specific failure.
+  5. **Insufficient data:** Tuning requires at least `min_measurements` (default 30) and `min_nights_for_tuning` (default 7) measurements in the lookback window. New installations will not tune until this threshold is met.
+</Accordion>
+
+<Accordion title="Weight changes have no effect on the observation plan">
+  Weight changes take effect on the next replan cycle, not immediately. The replan loop runs every 120 minutes by default.
+
+  To apply new weights immediately, trigger a manual rescore:
+
+  ```bash
+  curl -X POST \
+       -H "X-Admin-Key: your-admin-key" \
+       https://api.thetelescope.net/api/v1/admin/replan
+  ```
+
+  Also verify that weights were actually updated by checking the tuning endpoint:
+
+  ```bash
+  curl -H "X-Admin-Key: your-admin-key" \
+       https://api.thetelescope.net/api/v1/admin/tuning
+  ```
+
+  Inspect `active_weights` and `last_tuning_run` in the response.
+</Accordion>
+
+<Accordion title="Claude API errors during tuning">
+  | Error | Cause | Resolution |
+  |-------|-------|-----------|
+  | `429 Too Many Requests` | Rate limit hit on Anthropic API | Reduce frequency by increasing `lookback_days`, or temporarily disable tuning |
+  | `401 Unauthorized` | Invalid or expired API key | Verify `ANTHROPIC_API_KEY` is correct and the account has remaining quota |
+  | Content policy violation | Evidence brief triggers a content refusal (rare) | Tuning skips the apply step and logs a warning; weights remain unchanged |
+
+  All Claude API errors are caught, logged at ERROR level under `cloud.tuning`, and result in the weights being left unchanged. The error never surfaces to node agents or members.
+</Accordion>

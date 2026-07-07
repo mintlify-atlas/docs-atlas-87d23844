@@ -1,0 +1,565 @@
+---
+title: "Node API Endpoints: Registration, Heartbeat, and Data Upload"
+sidebarTitle: "Node Endpoints"
+description: "REST endpoints used by node agents — registration with activation code, 60-second heartbeats, observation plan download, photometry upload, FITS images, and interrupt polling."
+---
+
+Node endpoints form the data backbone of The Telescope Net. Every Seestar telescope running the node agent communicates exclusively through these routes — from the one-time registration that provisions its identity, through nightly heartbeats and plan downloads, to the photometry measurements and FITS images that flow back to the cloud after each observation. All endpoints except `POST /api/v1/nodes/register` require the `X-Node-Id` and `X-Api-Key` headers issued at registration.
+
+---
+
+## POST /api/v1/nodes/register
+
+Register a new node and obtain its permanent API credentials. This endpoint is called once during first-boot setup and requires an activation code rather than existing node credentials.
+
+<Note>
+After registration succeeds, the node agent saves the returned `node_id` and `api_key` to `data/cloud_state.json`. All subsequent calls use those credentials. You should not call this endpoint again unless the state file is lost — if the same activation code is re-presented within 15 minutes of first use, the server will return the same credentials idempotently.
+</Note>
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** None — activation code in request body
+
+    <ParamField body="activation_code" type="string" required>
+      Single-use code in `BS-YYYY-XXXXXXXX` format obtained from a member's account or an admin bulk-generation call.
+    </ParamField>
+
+    <ParamField body="latitude" type="float" required>
+      Observatory latitude in decimal degrees. Must not be exactly `0.0` — the server rejects the null island.
+    </ParamField>
+
+    <ParamField body="longitude" type="float" required>
+      Observatory longitude in decimal degrees.
+    </ParamField>
+
+    <ParamField body="telescope_model" type="string">
+      Model name, e.g. `"ZWO Seestar S50"`. Used to seed hardware spec defaults when not overridden by the activation code.
+    </ParamField>
+
+    <ParamField body="aperture_mm" type="float">
+      Telescope aperture in millimetres (default `50.0` for Seestar S50).
+    </ParamField>
+
+    <ParamField body="focal_length_mm" type="float">
+      Focal length in millimetres (default `250.0`).
+    </ParamField>
+
+    <ParamField body="filter_set" type="string">
+      JSON array string of photometric filter names, e.g. `'["CV"]'` or `'["B","V","R","I"]'`.
+    </ParamField>
+
+    <ParamField body="tier" type="integer">
+      Capability tier: `1` = Seestar (default), `2` = filtered, `3` = spectroscopy.
+    </ParamField>
+
+    <ParamField body="owner_name" type="string">
+      Human-readable name for the observatory or owner. Falls back to the activation code's stored value if omitted.
+    </ParamField>
+
+    <ParamField body="portable" type="boolean">
+      `true` if the telescope moves between sites. Portable nodes start in `sleeping` status and activate when a session begins.
+    </ParamField>
+
+    <Expandable title="Additional hardware fields">
+      <ParamField body="elevation" type="float">Elevation above sea level in metres.</ParamField>
+      <ParamField body="city" type="string">City or locality name.</ParamField>
+      <ParamField body="country" type="string">Country name or ISO code.</ParamField>
+      <ParamField body="utc_offset_hours" type="float">Local UTC offset, e.g. `-5.0`.</ParamField>
+      <ParamField body="mount_type" type="string">`"alt_az"` (default) or `"equatorial"`.</ParamField>
+      <ParamField body="max_exposure_s" type="float">Maximum sub-frame exposure in seconds (default `30.0` for alt-az field rotation limit).</ParamField>
+      <ParamField body="mag_bright_limit" type="float">Brightest target magnitude this node can safely image (default `6.0`).</ParamField>
+      <ParamField body="mag_faint_limit" type="float">Faintest reachable magnitude (default `15.5`).</ParamField>
+      <ParamField body="has_dew_heater" type="boolean">Prevents lens fogging in humid conditions.</ParamField>
+      <ParamField body="has_enclosure" type="boolean">Dome or minidome — can operate in light rain.</ParamField>
+      <ParamField body="has_ups" type="boolean">Survives brief power cuts.</ParamField>
+    </Expandable>
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="node_id" type="string">
+      Unique node identifier, e.g. `"node_a3f9b2c1"`. Persist this for all subsequent API calls.
+    </ResponseField>
+
+    <ResponseField name="api_key" type="string">
+      Secret API key. Treat as a password — never log or expose in URLs.
+    </ResponseField>
+
+    **Error codes**
+
+    | Status | Meaning |
+    |---|---|
+    | `404` | Activation code not found |
+    | `409` | Activation code already used (outside retry window) |
+    | `410` | Activation code expired |
+    | `400` | Missing or invalid location coordinates |
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl -X POST https://api.thetelescope.net/api/v1/nodes/register \
+         -H "Content-Type: application/json" \
+         -d '{
+           "activation_code": "BS-2026-ABCD1234",
+           "latitude": 30.2672,
+           "longitude": -97.7431,
+           "telescope_model": "ZWO Seestar S50",
+           "aperture_mm": 50,
+           "filter_set": "[\"CV\"]",
+           "tier": 1
+         }'
+    ```
+
+    ```json
+    {
+      "node_id": "node_a3f9b2c1",
+      "api_key": "aBcDeFgHiJkLmNoPqRsTuVwXyZ012345"
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## POST /api/v1/nodes/heartbeat
+
+Send a 60-second liveness signal to the cloud. The node agent calls this endpoint on a fixed interval throughout the night. The server updates `last_heartbeat` on the node record, which drives the online/offline indicator visible to members. Nodes that have not heartbeated within 15 minutes are considered offline.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** `X-Node-Id` + `X-Api-Key`
+
+    The request body is optional. When included, `conditions` are stored against the node record and made available to the scheduler for weather-aware planning.
+
+    <ParamField body="conditions" type="object">
+      Current local observing conditions snapshot.
+
+      <Expandable title="Condition fields">
+        <ParamField body="conditions.clear_fraction" type="float">
+          Sky clarity fraction, `0.0` (overcast) to `1.0` (fully clear).
+        </ParamField>
+        <ParamField body="conditions.humidity" type="float">
+          Relative humidity percentage, `0`–`100`.
+        </ParamField>
+        <ParamField body="conditions.temperature_c" type="float">
+          Ambient temperature in Celsius.
+        </ParamField>
+        <ParamField body="conditions.utc_offset_hours" type="float">
+          Current UTC offset. When present, updates the node's stored offset so plans use the correct local-time window.
+        </ParamField>
+      </Expandable>
+    </ParamField>
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="ok" type="boolean">
+      Always `true` when the heartbeat is accepted.
+    </ResponseField>
+
+    <ResponseField name="server_time" type="string">
+      ISO 8601 UTC timestamp of when the heartbeat was recorded. The node agent can use this to detect significant clock drift.
+    </ResponseField>
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl -X POST https://api.thetelescope.net/api/v1/nodes/heartbeat \
+         -H "X-Node-Id: node_a3f9b2c1" \
+         -H "X-Api-Key: <api_key>" \
+         -H "Content-Type: application/json" \
+         -d '{"conditions": {"clear_fraction": 0.95, "humidity": 42, "utc_offset_hours": -5.0}}'
+    ```
+
+    ```json
+    {
+      "ok": true,
+      "server_time": "2026-06-15T03:00:00.000000+00:00"
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## GET /api/v1/nodes/me
+
+Retrieve the full registry entry for the authenticated node, including all hardware fields and performance metrics computed by the nightly maintenance loop.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** `X-Node-Id` + `X-Api-Key`
+
+    No request body or query parameters.
+  </Tab>
+  <Tab title="Response">
+    **200 OK** — Returns the node's public view (all columns except `api_key` and `owner_email`).
+
+    <ResponseField name="node_id" type="string">Unique node identifier.</ResponseField>
+    <ResponseField name="latitude" type="float">Observatory latitude.</ResponseField>
+    <ResponseField name="longitude" type="float">Observatory longitude.</ResponseField>
+    <ResponseField name="tier" type="integer">Capability tier (1–3).</ResponseField>
+    <ResponseField name="aperture_mm" type="float">Telescope aperture.</ResponseField>
+    <ResponseField name="filter_set" type="string">JSON array of photometric filter names.</ResponseField>
+    <ResponseField name="status" type="string">Node status: `active`, `sleeping`, `vacation`, or `disabled`.</ResponseField>
+    <ResponseField name="online" type="boolean">Derived field: `true` when `last_heartbeat` is within 15 minutes and status is `active`.</ResponseField>
+    <ResponseField name="reliability_score" type="float">Composite 0–1 scheduler multiplier recomputed nightly from AAVSO acceptance rate, outlier rate, observation frequency, and photometric precision.</ResponseField>
+    <ResponseField name="total_observations" type="integer">Lifetime measurement count.</ResponseField>
+    <ResponseField name="aavso_accepted" type="integer">Measurements submitted to AAVSO.</ResponseField>
+    <ResponseField name="last_conditions" type="object">Most recently uploaded conditions snapshot.</ResponseField>
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl -H "X-Node-Id: node_a3f9b2c1" \
+         -H "X-Api-Key: <api_key>" \
+         https://api.thetelescope.net/api/v1/nodes/me
+    ```
+
+    ```json
+    {
+      "node_id": "node_a3f9b2c1",
+      "latitude": 30.2672,
+      "longitude": -97.7431,
+      "city": "Austin",
+      "country": "US",
+      "tier": 1,
+      "aperture_mm": 50.0,
+      "filter_set": "[\"CV\"]",
+      "status": "active",
+      "online": true,
+      "reliability_score": 0.82,
+      "scheduler_trust_score": 0.79,
+      "total_observations": 1423,
+      "aavso_accepted": 1287,
+      "last_conditions": {"clear_fraction": 0.95, "humidity": 42}
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## GET /api/v1/plan
+
+Download the current nightly observation plan for this node. The plan is generated by the CHORUS scheduler each evening based on target scores, node location, weather forecast, and network-wide coverage balance. If no current plan exists the server generates one on demand.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** `X-Node-Id` + `X-Api-Key`
+
+    No request body or query parameters.
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="plan" type="object">
+      The full `ObservationPlan` object, or `null` if no observable night window exists.
+
+      <Expandable title="Plan fields">
+        <ResponseField name="plan.plan_id" type="string">Unique plan identifier.</ResponseField>
+        <ResponseField name="plan.node_id" type="string">The node this plan was generated for.</ResponseField>
+        <ResponseField name="plan.night" type="string">Local evening date in `YYYY-MM-DD` format.</ResponseField>
+        <ResponseField name="plan.generated_at" type="string">ISO 8601 UTC timestamp of plan generation.</ResponseField>
+        <ResponseField name="plan.items" type="array">
+          Ordered list of `PlanItem` objects.
+
+          <Expandable title="PlanItem fields">
+            <ResponseField name="target" type="string">Target name, e.g. `"SS_Cyg"`.</ResponseField>
+            <ResponseField name="ra" type="float">Right ascension in decimal hours.</ResponseField>
+            <ResponseField name="dec" type="float">Declination in decimal degrees.</ResponseField>
+            <ResponseField name="expDur" type="float">Sub-frame exposure duration in seconds.</ResponseField>
+            <ResponseField name="expCount" type="integer">Number of sub-frames to stack.</ResponseField>
+            <ResponseField name="startTime" type="string">Scheduled start in node-local `HH:MM` format.</ResponseField>
+            <ResponseField name="filter" type="string">Photometric filter to use.</ResponseField>
+            <ResponseField name="score" type="float">Composite scheduling score (0–1) for this target on this node.</ResponseField>
+            <ResponseField name="observation_mode" type="string">`"single_epoch"` or `"time_series"`.</ResponseField>
+            <ResponseField name="duration_minutes" type="float">Total time on target for time-series mode.</ResponseField>
+          </Expandable>
+        </ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl -H "X-Node-Id: node_a3f9b2c1" \
+         -H "X-Api-Key: <api_key>" \
+         https://api.thetelescope.net/api/v1/plan
+    ```
+
+    ```json
+    {
+      "plan": {
+        "plan_id": "plan_20260615_node_a3f9b2c1",
+        "node_id": "node_a3f9b2c1",
+        "night": "2026-06-15",
+        "generated_at": "2026-06-15T01:00:00.000000+00:00",
+        "items": [
+          {
+            "target": "SS_Cyg",
+            "ra": 21.7,
+            "dec": 43.59,
+            "expDur": 30.0,
+            "expCount": 40,
+            "binning": 1,
+            "startTime": "22:15",
+            "filter": "CV",
+            "score": 0.87,
+            "observation_mode": "single_epoch",
+            "duration_minutes": 20.0
+          }
+        ]
+      }
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## POST /api/v1/measurements
+
+Upload a single photometry measurement. The cloud validates the measurement against physical bounds, stores it, and runs cross-validation against co-temporal observations from other nodes. Measurements that pass cross-validation and meet quality thresholds are queued for AAVSO submission.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** `X-Node-Id` + `X-Api-Key`
+
+    <ParamField body="measurement" type="object" required>
+      The photometry result from `photometry.run_pipeline()`.
+
+      <Expandable title="Measurement fields">
+        <ParamField body="measurement.target_name" type="string" required>Target name, e.g. `"SS_Cyg"`.</ParamField>
+        <ParamField body="measurement.bjd" type="float" required>Barycentric Julian Date. Must be between 2,400,000 and 2,500,000.</ParamField>
+        <ParamField body="measurement.magnitude" type="float" required>Measured magnitude. Must be between −5 and 30.</ParamField>
+        <ParamField body="measurement.uncertainty" type="float" required>1-σ photometric uncertainty in magnitudes. Must be between 0 and 5.</ParamField>
+        <ParamField body="measurement.filter" type="string" required>Photometric filter used, e.g. `"CV"`, `"V"`, `"B"`.</ParamField>
+        <ParamField body="measurement.quality_flag" type="string" required>`"good"`, `"acceptable"`, or `"poor"`. Only `good` and `acceptable` are eligible for AAVSO submission.</ParamField>
+        <ParamField body="measurement.airmass" type="float">Observing airmass at time of exposure.</ParamField>
+        <ParamField body="measurement.fwhm" type="float">Full-width half-maximum of the stellar PSF in pixels.</ParamField>
+        <ParamField body="measurement.snr" type="float">Signal-to-noise ratio of the target aperture.</ParamField>
+        <ParamField body="measurement.comparison_stars" type="integer">Number of comparison stars used in ensemble photometry.</ParamField>
+        <ParamField body="measurement.zero_point" type="float">Photometric zero-point for this frame.</ParamField>
+        <ParamField body="measurement.zp_scatter" type="float">RMS scatter of comparison star zero-points.</ParamField>
+        <ParamField body="measurement.fits_file" type="string">Filename of the source FITS frame (for traceability).</ParamField>
+      </Expandable>
+    </ParamField>
+
+    <ParamField body="conditions" type="object">
+      Observing conditions at the time of this measurement. Stored alongside the measurement for quality analysis.
+    </ParamField>
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="ok" type="boolean">`true` when the measurement was accepted and stored.</ResponseField>
+    <ResponseField name="id" type="integer">Database row ID of the stored measurement. `null` for idempotent duplicate submissions.</ResponseField>
+    <ResponseField name="duplicate" type="boolean">Present and `true` when the same node/target/BJD/filter combination was already stored.</ResponseField>
+
+    **400** is returned when the measurement fails validation bounds.
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl -X POST https://api.thetelescope.net/api/v1/measurements \
+         -H "X-Node-Id: node_a3f9b2c1" \
+         -H "X-Api-Key: <api_key>" \
+         -H "Content-Type: application/json" \
+         -d '{
+           "measurement": {
+             "target_name": "SS_Cyg",
+             "bjd": 2460476.5123,
+             "magnitude": 11.42,
+             "uncertainty": 0.018,
+             "filter": "CV",
+             "quality_flag": "good",
+             "airmass": 1.23,
+             "fwhm": 2.8,
+             "snr": 142.5,
+             "comparison_stars": 7
+           },
+           "conditions": {"clear_fraction": 0.95, "humidity": 38}
+         }'
+    ```
+
+    ```json
+    {
+      "ok": true,
+      "id": 84721
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## POST /api/v1/images
+
+Upload a raw FITS frame. The server stores the file under `cloud_data/images/` and returns a storage path. Images are retained for **14 days** before automatic pruning. File size is capped at the server's 128 MB content limit.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** `X-Node-Id` + `X-Api-Key`
+
+    **Content-Type:** `multipart/form-data`
+
+    <ParamField body="file" type="file" required>
+      The FITS file to upload. Attach as a multipart form field named `file`.
+    </ParamField>
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="ok" type="boolean">`true` when the file was stored.</ResponseField>
+    <ResponseField name="stored" type="string">Relative path under the image storage root where the file was saved.</ResponseField>
+
+    **400** is returned when no file is attached or storage fails.
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl -X POST https://api.thetelescope.net/api/v1/images \
+         -H "X-Node-Id: node_a3f9b2c1" \
+         -H "X-Api-Key: <api_key>" \
+         -F "file=@SS_Cyg_2026-06-15_001.fits"
+    ```
+
+    ```json
+    {
+      "ok": true,
+      "stored": "node_a3f9b2c1/2026-06-15/SS_Cyg_2026-06-15_001.fits"
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## POST /api/v1/aavso-files
+
+Upload an AAVSO Extended Format text file (`.txt`) generated by the node's photometry pipeline. Files are stored under `cloud_data/aavso_files/<date>/` and can be downloaded by an operator to email to `observations@aavso.org`. File size is capped at **512 KB**.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** `X-Node-Id` + `X-Api-Key`
+
+    **Content-Type:** `multipart/form-data`
+
+    <ParamField body="file" type="file" required>
+      The AAVSO `.txt` file. Filenames are sanitised server-side; a `.txt` extension is appended automatically if missing.
+    </ParamField>
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="ok" type="boolean">`true` when the file was stored.</ResponseField>
+    <ResponseField name="path" type="string">Relative path under the AAVSO file storage root.</ResponseField>
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl -X POST https://api.thetelescope.net/api/v1/aavso-files \
+         -H "X-Node-Id: node_a3f9b2c1" \
+         -H "X-Api-Key: <api_key>" \
+         -F "file=@SS_Cyg_20260615.txt"
+    ```
+
+    ```json
+    {
+      "ok": true,
+      "path": "2026-06-15/SS_Cyg_20260615.txt"
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## GET /api/v1/interrupts
+
+Poll for unexpired high-priority target interrupts broadcast by the cloud. The node agent calls this endpoint regularly alongside its heartbeat to detect urgent retargeting requests — for example, a supernova alert or gamma-ray burst follow-up that takes precedence over the nightly plan.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** `X-Node-Id` + `X-Api-Key`
+
+    No request body or query parameters.
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="interrupts" type="array">
+      List of unexpired interrupts applicable to this node. Interrupts targeted at a specific set of node IDs are filtered — only interrupts relevant to the calling node are returned.
+
+      <Expandable title="Interrupt fields">
+        <ResponseField name="id" type="integer">Unique interrupt ID. Use this with `POST /api/v1/interrupts/{id}/ack` to acknowledge.</ResponseField>
+        <ResponseField name="name" type="string">Target name.</ResponseField>
+        <ResponseField name="ra_deg" type="float">Target right ascension in decimal degrees.</ResponseField>
+        <ResponseField name="dec_deg" type="float">Target declination in decimal degrees.</ResponseField>
+        <ResponseField name="ra" type="float">Right ascension in decimal hours (pre-converted for node schedule compatibility).</ResponseField>
+        <ResponseField name="dec" type="float">Declination in decimal degrees.</ResponseField>
+        <ResponseField name="mag" type="float">Estimated target magnitude.</ResponseField>
+        <ResponseField name="reason" type="string">Human-readable reason for the interrupt, e.g. `"SN candidate"` or `"GRB afterglow follow-up"`.</ResponseField>
+        <ResponseField name="created_at" type="string">ISO 8601 UTC timestamp of interrupt creation.</ResponseField>
+        <ResponseField name="expires_at" type="string">ISO 8601 UTC timestamp after which the interrupt is no longer active.</ResponseField>
+        <ResponseField name="acked" type="boolean">`true` if this node has already acknowledged the interrupt.</ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl -H "X-Node-Id: node_a3f9b2c1" \
+         -H "X-Api-Key: <api_key>" \
+         https://api.thetelescope.net/api/v1/interrupts
+    ```
+
+    ```json
+    {
+      "interrupts": [
+        {
+          "id": 42,
+          "name": "SN2026abc",
+          "ra_deg": 210.5,
+          "dec_deg": 54.3,
+          "ra": 14.033,
+          "dec": 54.3,
+          "mag": 14.2,
+          "reason": "Type Ia SN candidate — early-phase follow-up requested",
+          "created_at": "2026-06-15T02:10:00.000000+00:00",
+          "expires_at": "2026-06-16T02:10:00.000000+00:00",
+          "acked": false
+        }
+      ]
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## POST /api/v1/interrupts/{id}/ack
+
+Acknowledge receipt of an interrupt. Once acknowledged, the `acked` field is set to `true` for this node on subsequent polls. Acknowledgment does not remove the interrupt — it remains visible to all other eligible nodes until it expires.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** `X-Node-Id` + `X-Api-Key`
+
+    <ParamField path="id" type="integer" required>
+      The interrupt ID from the `GET /api/v1/interrupts` response.
+    </ParamField>
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="ok" type="boolean">`true` when acknowledgment is recorded.</ResponseField>
+
+    **404** is returned when the interrupt ID is not found.
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl -X POST \
+         -H "X-Node-Id: node_a3f9b2c1" \
+         -H "X-Api-Key: <api_key>" \
+         https://api.thetelescope.net/api/v1/interrupts/42/ack
+    ```
+
+    ```json
+    {"ok": true}
+    ```
+  </Tab>
+</Tabs>

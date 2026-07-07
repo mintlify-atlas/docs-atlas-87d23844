@@ -1,0 +1,367 @@
+---
+title: "Configure the Node Agent with config.yaml"
+sidebarTitle: "Configuration"
+description: "Complete reference for every config.yaml section — cloud connection, photometry, AAVSO credentials, observatory location, safety, and image watcher settings."
+---
+
+Every aspect of the Node Agent's behaviour is controlled by a single file: `config.yaml` in the project root. The file is read at startup and re-read on demand — the in-browser config editor in the dashboard writes changes directly to this file and they take effect without a restart. This page documents every section and every parameter.
+
+<Tip>
+  **Dry-run config** — to test the dashboard without hardware or live cloud
+  submissions, paste this minimal block into your `config.yaml` before first
+  run. Everything in the UI works except hardware control and live data
+  processing.
+
+  ```yaml
+  cloud:
+    enabled: false
+
+  image_watcher:
+    enabled: false
+
+  photometry:
+    enabled: false
+
+  aavso:
+    dry_run: true
+  ```
+</Tip>
+
+---
+
+## `cloud` — Cloud Connection
+
+The `cloud` section controls how the Node Agent connects to The Telescope Net
+cloud API, registers itself, sends heartbeats, and receives observation plans.
+
+```yaml
+cloud:
+  enabled: true
+  url: https://api.thetelescope.net
+  activation_code: 'BS-2026-XXXXXXXX'  # used once on first boot, then cleared
+  api_key: ''                           # auto-populated after registration
+  node_id: ''                           # auto-populated after registration
+  auto_run_plans: true
+  heartbeat_interval: 60
+  plan_poll_interval: 300
+  upload_images: false
+  disconnect_park_timeout: 1800
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `enabled` | bool | `true` | Set `false` to run the node entirely offline. No registration, heartbeats, or plan polling. |
+| `url` | string | `https://api.thetelescope.net` | Base URL of the cloud API. Change only if self-hosting the cloud server. |
+| `activation_code` | string | `''` | Your `BS-YYYY-XXXXXXXX` Node Activation Code. Written here by the installer. Automatically cleared from the file after successful first-boot registration. |
+| `api_key` | string | `''` | Auto-populated after registration. Can also be set via the `${CLOUD_NODE_API_KEY}` environment variable for secrets management. |
+| `node_id` | string | `''` | Auto-populated after registration. Saved to `data/cloud_state.json` so it survives config edits. |
+| `auto_run_plans` | bool | `true` | When `true`, new observation plans downloaded from the cloud are started automatically. Set `false` to require manual approval from the dashboard before any plan runs. |
+| `heartbeat_interval` | int | `60` | Seconds between heartbeat POSTs to `/api/v1/nodes/heartbeat`. The cloud marks a node offline if no heartbeat is received within ~5 minutes. |
+| `plan_poll_interval` | int | `300` | Seconds between plan polls to `GET /api/v1/plan`. |
+| `upload_images` | bool | `false` | When `true`, raw FITS files are also uploaded to `POST /api/v1/images` after each photometry run. Retained on the cloud for 14 days. |
+| `disconnect_park_timeout` | int | `1800` | Seconds of failed heartbeats before the node parks the telescope as a safety measure. Set `0` to disable. |
+
+<Note>
+  After the first successful registration, `activation_code` is automatically
+  set to `''` in `config.yaml`. Subsequent API calls use `node_id` and
+  `api_key` from `data/cloud_state.json`. You never need to re-enter the
+  activation code.
+</Note>
+
+---
+
+## `observatory` — Location and Hardware Identity
+
+The observatory section describes your physical setup. Coordinates are used by the scheduler to compute airmass, moon angle, and twilight times.
+
+```yaml
+observatory:
+  name: "Starfront Observatories, Rockwood TX"
+  latitude: 31.3614    # decimal degrees N
+  longitude: -99.4431  # decimal degrees E (negative = West)
+  elevation: 525       # metres above sea level
+  telescope: "ZWO Seestar S50"
+  instrument: "ZWO Seestar S50 IMX462"
+  observer: ""
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `latitude` | float | `null` | Your observing latitude in decimal degrees. Positive = North. Required for dawn parking and airmass calculations. |
+| `longitude` | float | `null` | Your observing longitude in decimal degrees. Positive = East, negative = West. |
+| `elevation` | float | `0.0` | Site elevation in metres above sea level. Used for pressure-corrected airmass. |
+| `name` | string | `''` | Human-readable site name shown in the dashboard and cloud node registry. |
+| `telescope` | string | `'ZWO Seestar S50'` | Telescope model name. Used by the cloud to look up aperture and field-of-view parameters for scheduling. |
+| `instrument` | string | `'ZWO Seestar S50 IMX462'` | Camera/instrument description written into FITS headers. |
+| `observer` | string | `''` | Your name, written into FITS headers and the cloud node registry. |
+
+---
+
+## `photometry` — Photometry Pipeline
+
+The photometry section configures the aperture photometry pipeline that runs automatically on each new FITS file when `image_watcher` detects one.
+
+```yaml
+photometry:
+  enabled: true
+  node_id: "seestar-live-001"
+  filter_name: CV
+  gain: 1
+  read_noise: 5
+  astap_path: astap
+  astap_search_radius: 10
+  force_plate_solve: true
+  bjd_midpoint_correction: true
+  aperture_factor: 1.5
+  annulus_inner: 4
+  annulus_outer: 6
+  field_radius: 0.5
+  mag_limit: 15
+  mag_min: 10
+  min_comparison_stars: 3
+  snr_threshold: 20
+  max_uncertainty: 0.3
+  max_airmass: 3
+  saturation_adu: 60000
+  zp_scatter_warn: 0.15
+  zp_scatter_max: 0.3
+  pixel_scale: 2.4
+  max_exposure_s: 30
+  fwhm_fallback_px: 4.01
+  comparison_catalogs:
+    - aavso
+    - apass
+    - gaia
+  comparison_star_file: ''
+  comparison_target_count: 8
+  target:
+    name: ''        # leave blank to read from FITS OBJECT header
+    ra_deg: null
+    dec_deg: null
+  fits_export:
+    enabled: true
+    export_dir: fits_export
+```
+
+### Core settings
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `enabled` | bool | `false` | Set `true` to run the pipeline on every new FITS file detected by the image watcher. |
+| `node_id` | string | `''` | Node identifier stamped into every measurement dict and uploaded to the cloud. |
+| `filter_name` | string | `'CV'` | Filter code written into photometry results and AAVSO submissions. `CV` = clear/visual band (standard for Seestar). |
+| `gain` | float | `1.0` | Camera gain in e⁻/ADU. Used for Poisson noise estimation in the SNR calculation. |
+| `read_noise` | float | `5.0` | Camera read noise in electrons. Combined with Poisson noise in the uncertainty budget. |
+
+### Plate-solving
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `astap_path` | string | `'astap'` | Path to the ASTAP binary. If ASTAP is not on your system `PATH`, set this to the full path, e.g. `/usr/local/bin/astap`. |
+| `astap_search_radius` | int | `10` | ASTAP search radius in degrees. Increase if your Seestar's pointing is far off (useful for initial sessions). |
+| `force_plate_solve` | bool | `true` | Always run ASTAP even if the FITS header already contains WCS keywords. |
+| `bjd_midpoint_correction` | bool | `true` | Compute BJD at mid-exposure (`DATE-OBS + EXPTIME/2`). Set `false` for devices where `DATE-OBS` is already the mid- or end-point. |
+| `pixel_scale` | float | `2.4` | Pixel scale in arcseconds/pixel. Used by ASTAP and for aperture size calculations. |
+
+### Aperture photometry
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `aperture_factor` | float | `1.5` | Aperture radius = `aperture_factor × FWHM`. Larger values capture more signal but also more sky background noise. |
+| `annulus_inner` | float | `4.0` | Inner sky annulus radius in units of FWHM. |
+| `annulus_outer` | float | `6.0` | Outer sky annulus radius in units of FWHM. |
+| `fwhm_fallback_px` | float | `4.01` | FWHM in pixels used when the automatic star-shape measurement fails. |
+
+### Comparison stars and quality gates
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `field_radius` | float | `0.5` | Radius in degrees to search for comparison stars around the target. |
+| `mag_limit` | float | `15.0` | Faintest comparison star magnitude to include from catalogues. |
+| `mag_min` | float | `10.0` | Brightest comparison star magnitude to include (avoids saturated references). |
+| `min_comparison_stars` | int | `3` | Minimum comparison stars required for a valid measurement. Fewer stars than this causes the frame to be rejected. |
+| `snr_threshold` | float | `20.0` | Minimum SNR for a `good` quality flag. Measurements below this threshold are marked `acceptable` or `poor`. |
+| `max_uncertainty` | float | `0.3` | Maximum allowed photometric uncertainty in magnitudes. Results above this are flagged `poor`. |
+| `max_airmass` | float | `3.0` | Frames taken above this airmass are rejected — atmospheric extinction becomes unpredictable. |
+| `saturation_adu` | int | `60000` | ADU level treated as saturated. Saturated target pixels force `quality=poor`; saturated comparison stars are excluded from the zero-point ensemble. |
+| `zp_scatter_warn` | float | `0.15` | Zero-point ensemble scatter above this value blocks `quality=good`. |
+| `zp_scatter_max` | float | `0.3` | Zero-point ensemble scatter above this value forces `quality=poor`. |
+| `comparison_catalogs` | list | `[aavso, apass, gaia]` | Catalogue priority order for comparison star lookup. `aavso` is tried first; `gaia` DR3 is the fallback for targets outside AAVSO VSX. |
+| `comparison_star_file` | string | `''` | Path to a local JSON catalogue for offline or reproducible validation runs. Leave blank to use live catalogue queries. |
+| `comparison_target_count` | int | `8` | Target number of comparison stars to use in the zero-point ensemble. |
+
+### Target override
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `target.name` | string | `''` | Target name. Leave blank to read from the FITS `OBJECT` header (standard for cloud-scheduled plans). |
+| `target.ra_deg` | float | `null` | Target RA in decimal degrees. Leave `null` to read from FITS WCS. |
+| `target.dec_deg` | float | `null` | Target Dec in decimal degrees. Leave `null` to read from FITS WCS. |
+
+### FITS export
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `fits_export.enabled` | bool | `true` | Write an enhanced FITS file with photometry results embedded in the header after each measurement. |
+| `fits_export.export_dir` | string | `'fits_export'` | Directory where enhanced FITS files are written (relative to the project root). |
+
+---
+
+## `aavso` — AAVSO Submission
+
+The AAVSO section controls submission of photometry results to the American Association of Variable Star Observers via the WebObs API.
+
+```yaml
+aavso:
+  observer_code: "EGBA"
+  username: ${AAVSO_USERNAME}
+  password: ${AAVSO_PASSWORD}
+  audit_dir: aavso_submissions
+  dry_run: false
+  submit_poor_quality: false
+  submit_from_node: false
+  chart_id: ''
+```
+
+<Warning>
+  You must set `observer_code`, `username`, and `password` before the node can
+  make live AAVSO submissions. Without a valid observer code, all results are
+  written to the audit directory but never POSTed to WebObs. Use
+  `${AAVSO_USERNAME}` and `${AAVSO_PASSWORD}` environment variable references
+  to keep credentials out of the tracked config file.
+</Warning>
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `observer_code` | string | `''` | Your **AAVSO OBSCODE** (e.g. `EGBA`). Required for all submissions. Request one at [aavso.org](https://www.aavso.org/become-observer). |
+| `username` | string | `''` | AAVSO login username. Required for live `POST` to WebObs. Accepts `${ENV_VAR}` references. |
+| `password` | string | `''` | AAVSO login password. Required for live `POST`. Accepts `${ENV_VAR}` references. |
+| `audit_dir` | string | `'aavso_submissions'` | Directory where AAVSO Extended File Format `.txt` files and WebObs response logs are written (one subdirectory per date). |
+| `dry_run` | bool | `false` | When `true`, the submission file is written to `audit_dir` but never POSTed to WebObs. Use this to validate format before going live. |
+| `submit_poor_quality` | bool | `false` | When `false`, only `good` and `acceptable` quality measurements are submitted. `poor` results are written to audit but not POSTed. |
+| `submit_from_node` | bool | `false` | Submit directly from the node rather than routing through the cloud data pipeline. Useful for standalone setups not connected to the cloud. |
+| `chart_id` | string | `''` | Optional AAVSO chart ID to include in submissions for targets that have a standard comparison sequence. |
+
+---
+
+## `safety` — Safety Manager
+
+The Safety Manager runs as a daemon thread that monitors telescope connectivity, parks the mount at dawn, and handles graceful shutdown on `SIGTERM`/`SIGINT`.
+
+```yaml
+safety:
+  enabled: true
+  disconnect_timeout: 600
+  heartbeat_interval: 30
+  reconnect_attempts: 3
+  reconnect_delay: 10
+  park_at_dawn: true
+  dawn_type: astronomical   # astronomical | nautical | civil
+  observer:
+    latitude: 31.3614
+    longitude: -99.4431
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `enabled` | bool | `true` | Set `false` to disable the safety watchdog entirely. Not recommended for unattended runs. |
+| `disconnect_timeout` | int | `600` | Seconds of failed ALPACA heartbeats before the Safety Manager triggers an emergency park. |
+| `heartbeat_interval` | int | `30` | Seconds between ALPACA ping checks (`GET /connected`). |
+| `reconnect_attempts` | int | `3` | Number of reconnect attempts before the disconnect timer starts counting. |
+| `reconnect_delay` | int | `10` | Seconds between each reconnect attempt. |
+| `park_at_dawn` | bool | `true` | Automatically park the telescope when the sun rises above the configured dawn elevation. |
+| `dawn_type` | string | `'astronomical'` | Sun elevation threshold for dawn parking. `astronomical` = −18°, `nautical` = −12°, `civil` = −6°. At mid-latitudes in summer the sun may not reach −18° — try `nautical` if dawn parking never triggers. |
+| `observer.latitude` | float | `0.0` | Observer latitude for solar position calculation. Must be non-zero for dawn parking to work. |
+| `observer.longitude` | float | `0.0` | Observer longitude for solar position calculation. |
+
+<Warning>
+  Both `safety.observer.latitude` and `safety.observer.longitude` must be
+  set to non-zero values for dawn parking to trigger. If these are left at
+  `0.0`, the Safety Manager cannot compute the sun's elevation and dawn parking
+  is silently skipped.
+</Warning>
+
+---
+
+## `image_watcher` — FITS File Monitor
+
+The Image Watcher uses OS filesystem events (`inotify` on Linux, `FSEvents` on macOS, `kqueue` on BSD) to detect new FITS files written to the Seestar's SMB share and pass them to the photometry pipeline.
+
+```yaml
+image_watcher:
+  enabled: true
+  watch_path: /mnt/seestar
+  debounce_delay: 2
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `enabled` | bool | `false` | Set `true` to watch `watch_path` for new `.fits` and `.fit` files. |
+| `watch_path` | string | `'/mnt/seestar'` | Absolute path to the directory containing Seestar FITS output. Typically the SMB share mount point: `/mnt/seestar` (Linux), `/Volumes/Seestar` (macOS). The Node Agent attempts to auto-mount this share after connecting. |
+| `debounce_delay` | float | `2.0` | Seconds to wait after a file creation event before firing the callback. This lets partial writes finish so the pipeline receives a complete FITS file. |
+
+---
+
+## `devices` — ALPACA Device Enables
+
+The `devices` section controls which ALPACA devices the Node Agent attempts to connect when you click "Connect" in the dashboard. Disable devices that are not present to suppress connection warnings.
+
+```yaml
+devices:
+  telescope:
+    device_number: 0
+    enabled: true
+  camera:
+    device_number: 0
+    enabled: true
+  focuser:
+    device_number: 0
+    enabled: false
+  filterwheel:
+    device_number: 0
+    enabled: false
+  covercalibrator:
+    device_number: 0
+    enabled: true
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `telescope.enabled` | bool | `true` | Connect the ALPACA telescope device (slew, park, track). |
+| `camera.enabled` | bool | `true` | Connect the ALPACA camera device (expose, image download, state). |
+| `focuser.enabled` | bool | `false` | Connect the ALPACA focuser device. Required for autofocus. |
+| `filterwheel.enabled` | bool | `false` | Connect the ALPACA filter wheel device. Required for multi-band BVRI photometry. |
+| `covercalibrator.enabled` | bool | `true` | Connect the ALPACA cover calibrator (arm control on Seestar). Set `false` to suppress the `400 Client Error: CoverCalibrator` warning if no device is configured at index 0. |
+
+---
+
+## Minimal Configuration Checklist
+
+Before your first science run, verify these settings are filled in:
+
+<Steps>
+  ### Observatory coordinates
+  Set `observatory.latitude` and `observatory.longitude` (decimal degrees).
+  These are required for airmass computation, AAVSO submissions, and dawn
+  parking.
+
+  ### AAVSO credentials
+  Set `aavso.observer_code`, `aavso.username`, and `aavso.password`. Consider
+  using environment variable references (`${AAVSO_PASSWORD}`) to keep secrets
+  out of the config file.
+
+  ### Image watcher path
+  Set `image_watcher.watch_path` to the mount point for your Seestar's SMB
+  share. The Node Agent will auto-mount it on macOS and Linux after
+  connecting, but the path must exist as a mount point.
+
+  ### Cloud activation code
+  If you skipped the installer, paste your `BS-YYYY-XXXXXXXX` code into
+  `cloud.activation_code`. It is consumed on first boot and automatically
+  cleared.
+
+  ### Safety observer coordinates
+  Copy `observatory.latitude` / `observatory.longitude` into
+  `safety.observer.latitude` / `safety.observer.longitude` so dawn parking
+  works correctly.
+</Steps>

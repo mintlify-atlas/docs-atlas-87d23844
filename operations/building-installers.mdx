@@ -1,0 +1,183 @@
+---
+title: "Build Node Agent Installers for Windows, macOS, and Linux"
+sidebarTitle: "Building Installers"
+description: "Use PyInstaller and the build system to produce one-click Node Agent installers for Windows (NSIS), macOS (.pkg), and Linux (systemd) — including service registration and sleep prevention."
+---
+
+The Node Agent build system uses PyInstaller to bundle `src/main_service.py` and all dependencies into a single self-contained executable, then wraps it in a platform-native installer that registers the agent as a system service, writes the initial `config.yaml` from a template, and configures the OS to prevent sleep during overnight operation. Donors receive one file to download and one prompt to answer — their activation code — and the telescope is online.
+
+## Prerequisites
+
+| Requirement | Platform | Notes |
+|-------------|----------|-------|
+| Python 3.10+ | All | Must be on PATH |
+| PyInstaller | All | `pip install pyinstaller` |
+| [NSIS 3.x](https://nsis.sourceforge.io/) | Windows only | `makensis` must be on PATH |
+| NSSM | Windows only | Placed at `build/windows/nssm/nssm.exe` — bundled into the installer |
+| Xcode CLI tools | macOS only | Required by `pkgbuild`/`productbuild` |
+| Nothing extra | Linux | AppImage optional via `appimagetool` |
+
+The build script also automatically downloads the ASTAP plate-solver binary for the current platform from `hnsky.org` into `build/binaries/` before running PyInstaller, so end users do not need to install ASTAP separately. The G18 star catalogue (~6 GB) is **not** bundled — the Node Agent downloads it on first run via the dashboard setup wizard.
+
+---
+
+## Building
+
+```bash
+pip install pyinstaller
+
+# Auto-detect current platform and build the full installer
+python3 build/build.py
+
+# PyInstaller bundle only (skip the OS installer wrapper)
+python3 build/build.py --bundle-only
+
+# Remove dist/ and build cache before building
+python3 build/build.py --clean
+
+# Download the ASTAP binary for the current platform, then exit
+python3 build/build.py --download-astap
+
+# Skip ASTAP download (bundle will use pointing-WCS fallback)
+python3 build/build.py --skip-astap
+```
+
+**Output files:**
+
+| Platform | Output |
+|----------|--------|
+| Windows | `dist/TelescopeNetNode-Setup.exe` |
+| macOS | `dist/BoundlessSkiesNode-X.Y.Z-macOS.pkg` |
+| Linux | `dist/BoundlessSkiesNode-linux-x86_64` |
+
+<Warning>
+Windows builds require both `makensis` (NSIS) and `nssm.exe` to be available. If `makensis` is not found on PATH, the script prints a warning and skips the NSIS step — you will get the PyInstaller bundle but not the `.exe` installer. Install NSIS from [nsis.sourceforge.io](https://nsis.sourceforge.io/) and ensure it is on your PATH.
+</Warning>
+
+<Tip>
+Use `--bundle-only` when you want to test PyInstaller packaging without having NSIS or platform-specific packaging tools installed. The resulting bundle is a working executable — it just lacks the OS installer wrapper that handles service registration and activation code prompts.
+</Tip>
+
+---
+
+## Windows Installer (NSIS + NSSM)
+
+The Windows installer is built from `build/windows/install.nsi` using NSIS. It produces `dist/TelescopeNetNode-Setup.exe` — a standard Windows installer that donors run with a double-click.
+
+**What the installer does:**
+
+<Steps>
+  <Step title="Prompt for activation code">
+    A custom NSIS page asks for the donor's Node Activation Code (`BS-YYYY-XXXXXXXX`). The code is validated for the correct `BS-` prefix, then written into `config.yaml` at the `cloud.activation_code` field. Donors get their code from [telescopenet.org/account](https://telescopenet.org/account).
+  </Step>
+  <Step title="Install files">
+    The main executable is installed to `%PROGRAMFILES64%\TelescopeNet\NodeAgent\`. Data files (config, logs, FITS exports, AAVSO submissions) are placed in `%APPDATA%\TelescopeNet\NodeAgent\`.
+  </Step>
+  <Step title="Disable AC idle sleep">
+    The installer calls:
+    ```
+    powercfg /change standby-timeout-ac 0
+    powercfg /change hibernate-timeout-ac 0
+    powercfg /change disk-timeout-ac 0
+    ```
+    This prevents Windows from sleeping while the telescope is plugged in — critical for all-night operation. Uninstalling the agent restores the default timeouts (30 min standby, 60 min hibernate).
+  </Step>
+  <Step title="Register as a Windows service via NSSM">
+    NSSM (the Non-Sucking Service Manager) registers `TelescopeNetNode` as a Windows service set to `SERVICE_AUTO_START`. Log rotation is configured to cap each log file at 5 MB. The service is started immediately after installation.
+  </Step>
+  <Step title="Create Start Menu shortcuts">
+    Shortcuts are added for the local dashboard (`http://localhost:5173`), the data folder, and the uninstaller.
+  </Step>
+</Steps>
+
+---
+
+## macOS Package (.pkg)
+
+The macOS build produces a signed `.pkg` installer via `pkgbuild` and `productbuild` (Xcode CLI tools).
+
+**Installation layout:**
+
+| Path | Contents |
+|------|----------|
+| `/Applications/TelescopeNetNode/` | Main executable |
+| `/Library/LaunchDaemons/org.telescopenet.nodeagent.plist` | launchd service definition |
+| `/Library/Application Support/TelescopeNet/NodeAgent/` | Config, logs, data |
+
+**What the installer does:**
+
+- Installs the launchd plist to `/Library/LaunchDaemons/` — the agent starts automatically at boot and restarts if it crashes
+- Calls `pmset -c sleep 0` to disable AC idle sleep, preventing the Mac from sleeping while plugged in
+- Data directory: `/Library/Application Support/TelescopeNet/NodeAgent/`
+
+The launchd approach means the agent runs as a system service even when no user is logged in, which is the correct behaviour for a machine dedicated to overnight telescope operation.
+
+---
+
+## Linux (systemd)
+
+Linux installation is handled by `build/linux/install.sh`. The recommended path is a one-line installer:
+
+```bash
+# One-line install (recommended)
+curl -sSL https://telescopenet.org/install.sh | sudo bash --code BS-2026-XXXXXXXX
+
+# Or run the install script manually from the repo
+sudo bash build/linux/install.sh --code BS-2026-XXXXXXXX
+```
+
+**What the installer does:**
+
+<Steps>
+  <Step title="Create service user">
+    Creates a `telescopenet` system user with no login shell, used to run the agent with minimal privileges.
+  </Step>
+  <Step title="Install binary and config">
+    Installs the Node Agent binary and writes `config.yaml` from the template with the activation code substituted.
+  </Step>
+  <Step title="Install and enable systemd unit">
+    Installs the `telescopenet-node.service` unit file and enables it so the agent starts at boot:
+    ```bash
+    systemctl enable --now telescopenet-node.service
+    ```
+  </Step>
+  <Step title="Mask sleep targets">
+    Prevents the system from sleeping overnight by masking the relevant systemd targets:
+    ```bash
+    systemctl mask sleep.target suspend.target \
+                    hibernate.target hybrid-sleep.target
+    ```
+  </Step>
+</Steps>
+
+---
+
+## Sleep Prevention
+
+Preventing the host machine from sleeping is critical for overnight telescope operation. Each platform uses OS-native mechanisms both at install time and at runtime:
+
+| Platform | Install-time | Runtime |
+|----------|-------------|---------|
+| Windows | `powercfg /change standby-timeout-ac 0` | `SetThreadExecutionState` (ES_CONTINUOUS \| ES_SYSTEM_REQUIRED) |
+| macOS | `pmset -c sleep 0` | `caffeinate -i -w <PID>` |
+| Linux | Mask `sleep.target` etc. | `systemd-inhibit --what=sleep` |
+
+The runtime sleep prevention (`src/sleep_prevention.py`) is a separate layer from the installer-level power settings. Both must be active for a robust setup — the installer sets the OS policy, and the runtime inhibitor ensures the agent itself holds a sleep lock for the duration of the night.
+
+<Warning>
+If sleep prevention is not working, an overnight session can be silently interrupted mid-observation with no error logged. Verify that the OS power settings were applied during installation and that the `sleep_prevention` component appears as active in the node dashboard.
+</Warning>
+
+---
+
+## Build System Files
+
+| File | Purpose |
+|------|---------|
+| `build/build.py` | Cross-platform build orchestration script (run this) |
+| `build/node_agent.spec` | PyInstaller spec — controls what is bundled into the executable |
+| `build/config.template.yaml` | Config template written by installers; contains `ACTIVATION_CODE_PLACEHOLDER` |
+| `build/windows/install.nsi` | NSIS installer script for Windows |
+| `build/macos/build_dmg.sh` | macOS `.pkg` build script |
+| `build/linux/install.sh` | systemd install script for Linux |
+| `build/binaries/` | ASTAP binary download cache (auto-populated by `build.py`) |

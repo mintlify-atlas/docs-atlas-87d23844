@@ -1,0 +1,148 @@
+---
+title: "Authenticate Requests to the Cloud API"
+sidebarTitle: "Authentication"
+description: "Three authentication schemes for The Telescope Net API — node credentials (X-Node-Id + X-Api-Key), member bearer tokens, and admin key — with examples for each caller type."
+---
+
+The Telescope Net API uses three distinct authentication schemes depending on who is making the request. Node agents use a long-lived API key pair obtained at first-boot registration. Members and app users authenticate with rotating bearer tokens issued at login. Administrators use a single shared key configured server-side. None of these schemes use OAuth or session cookies — all credentials are passed as HTTP headers on every request.
+
+---
+
+## Node authentication
+
+Node agents authenticate every API call (except initial registration) using two headers sent together:
+
+| Header | Value |
+|---|---|
+| `X-Node-Id` | Unique identifier assigned at registration, e.g. `node_a3f9b2c1` |
+| `X-Api-Key` | Secret key assigned at registration |
+
+### Obtaining node credentials
+
+Node credentials are issued once during first-boot registration. The node sends its `activation_code` (obtained from the member app or an admin-generated bulk code) along with its hardware details to `POST /api/v1/nodes/register`. The server validates the code, creates a node record, and returns the `node_id` and `api_key`.
+
+The node agent persists these credentials to `data/cloud_state.json` on the local filesystem. On every subsequent startup the agent reads this file and uses the stored credentials — it never needs to re-register unless the state file is deleted.
+
+<Note>
+Activation codes follow the format `BS-YYYY-XXXXXXXX` (e.g. `BS-2026-ABCD1234`). Each code is single-use and is marked consumed on the server the moment registration succeeds. Possession of the code allows recovering the same credentials within a 15-minute retry window in case the registration response was lost in transit.
+</Note>
+
+### Example
+
+```bash
+curl -H "X-Node-Id: node_a3f9b2c1" \
+     -H "X-Api-Key: <api_key>" \
+     https://api.thetelescope.net/api/v1/plan
+```
+
+Invalid or missing credentials return:
+
+```json
+{"error": "invalid node credentials"}
+```
+
+---
+
+## Member authentication
+
+Members and app users authenticate with a bearer token obtained by logging in. The token is passed on every authenticated request in the `Authorization` header.
+
+### Security model
+
+Passwords are hashed server-side using **PBKDF2-HMAC-SHA256** with a per-user random salt and **260,000 iterations** — comfortably above the OWASP 2024 minimum. Bearer tokens are random 32-byte URL-safe strings (`secrets.token_urlsafe(32)`) stored as SHA-256 hashes; the plaintext token is never persisted.
+
+Each successful login issues a **new token**, invalidating the previous one. There is no refresh flow — clients that receive a `401` should prompt the user to log in again.
+
+### Registration and login flow
+
+<CodeGroup>
+```bash Register
+curl -X POST https://api.thetelescope.net/api/v1/auth/register \
+     -H "Content-Type: application/json" \
+     -d '{"email": "you@example.com", "password": "hunter2-but-longer", "display_name": "Jane"}'
+```
+
+```json Register response
+{
+  "user_id": "u_4a8b1c2d",
+  "token": "<bearer_token>"
+}
+```
+</CodeGroup>
+
+<CodeGroup>
+```bash Login
+curl -X POST https://api.thetelescope.net/api/v1/auth/login \
+     -H "Content-Type: application/json" \
+     -d '{"email": "you@example.com", "password": "hunter2-but-longer"}'
+```
+
+```json Login response
+{
+  "user_id": "u_4a8b1c2d",
+  "token": "<bearer_token>"
+}
+```
+</CodeGroup>
+
+### Using the token
+
+Pass the token from the login response in every subsequent member request:
+
+```bash
+curl -H "Authorization: Bearer <bearer_token>" \
+     https://api.thetelescope.net/api/v1/me
+```
+
+<Tip>
+The API also accepts the token in an `X-Auth-Token` header as an alternative to `Authorization: Bearer`, for clients where setting the `Authorization` header is inconvenient.
+</Tip>
+
+Invalid or expired tokens return:
+
+```json
+{"error": "authentication required"}
+```
+
+### Generating an activation code for node registration
+
+Once logged in, a member generates a personal activation code to link a new node to their account. The code expires after **30 days**.
+
+```bash
+curl -X POST https://api.thetelescope.net/api/v1/me/activation-code \
+     -H "Authorization: Bearer <your_token>" \
+     -H "Content-Type: application/json" \
+     -d '{"location_name": "Rockwood TX", "telescope_model": "ZWO Seestar S50"}'
+```
+
+```json
+{
+  "code": "BS-2026-ABCD1234",
+  "expires_at": "2026-07-15T14:22:00.000000+00:00"
+}
+```
+
+The `location_name` is geocoded via Nominatim and stored with the code so that the node automatically receives coordinates at registration even if it has not yet configured them locally. The `telescope_model` seeds the hardware spec defaults.
+
+---
+
+## Admin authentication
+
+Admin endpoints are protected by a single shared secret passed in the `X-Admin-Key` header on every request. The key is set in `cloud/config.yaml` under `server.admin_key` and compared with a constant-time comparison to prevent timing attacks.
+
+```bash
+curl -X POST \
+     -H "X-Admin-Key: your-admin-key" \
+     -H "Content-Type: application/json" \
+     https://api.thetelescope.net/api/v1/admin/ingest
+```
+
+Invalid or missing admin keys return:
+
+```json
+{"error": "invalid admin key"}
+```
+
+<Warning>
+Change `server.admin_key` from any default value before exposing the API on a public network. There is no rate limiting on admin endpoints — a leaked key grants full control over ingestion, scheduling, activation code generation, and scoring weights.
+</Warning>

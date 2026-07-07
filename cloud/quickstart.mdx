@@ -1,0 +1,121 @@
+---
+title: "Deploy the Cloud Server for Telescope Scheduling"
+sidebarTitle: "Quickstart"
+description: "Get the Telescope Net cloud server running locally in minutes — configure AAVSO credentials, start the Flask API, and verify node connectivity with the health endpoint."
+---
+
+The Telescope Net cloud server is a Flask API that sits at the centre of the whole network. It ingests alerts from half a dozen astronomical brokers every hour, scores every (target, node) pair, generates nightly observation plans for each connected Seestar, and batches accepted photometry to AAVSO WebObs — all with no manual intervention. This page walks you through running it locally in a few minutes.
+
+## Prerequisites
+
+- Python 3.10 or later
+- `pip` available in your environment
+- Your AAVSO credentials (observer code, username, password)
+- A PostgreSQL database URL (set as `DATABASE_URL` in the environment — Railway and Fly.io provide this automatically)
+- Optional: `ANTHROPIC_API_KEY` if you want to enable the nightly Claude weight-tuning monitor
+
+## Setup
+
+<Steps>
+
+### Install dependencies
+
+```bash
+cd cloud/
+pip install flask pyyaml requests psycopg2-binary
+```
+
+### (Optional) Enable Claude weight tuning
+
+The weight-tuning monitor is opt-in and ships disabled. If you want to turn it on later, install the Anthropic client now and export your key:
+
+```bash
+export ANTHROPIC_API_KEY="sk-ant-..."
+pip install anthropic
+```
+
+### Configure credentials
+
+Open `cloud/config.yaml` and fill in the three required fields before the server will accept live AAVSO submissions:
+
+```yaml
+server:
+  admin_key: '${CLOUD_ADMIN_KEY}'   # change this — never commit the real value
+
+aavso:
+  observer_code: 'MXXX'             # your AAVSO OBSCODE
+  username: '${AAVSO_USERNAME}'
+  password: '${AAVSO_PASSWORD}'
+```
+
+The config expands `${VAR}` references from the environment, so you can keep secrets out of the file entirely by exporting `CLOUD_ADMIN_KEY`, `AAVSO_USERNAME`, and `AAVSO_PASSWORD` in your shell.
+
+### Set the database URL
+
+```bash
+export DATABASE_URL="postgresql://user:pass@localhost/telescopenet"
+```
+
+On Railway or Fly.io this variable is injected automatically. Locally, any PostgreSQL instance works — a fresh Homebrew install with `createdb telescopenet` is sufficient for development.
+
+### Start the server
+
+```bash
+python3 -m cloud.main
+```
+
+The server binds to `0.0.0.0:8800` by default. You should see log lines as the background loops start up.
+
+### Verify the health endpoint
+
+```bash
+curl http://localhost:8800/api/v1/health
+```
+
+A `200 OK` response means the Flask API is up and the database schema has been auto-migrated. The server is ready to accept node heartbeats and serve plans.
+
+</Steps>
+
+## Background Loops
+
+Once the server starts, four daemon threads begin running automatically. Each loop is independent — one failure never kills another.
+
+| Loop | Frequency | Description |
+|------|-----------|-------------|
+| `alert-ingest` | Every 60 min | Poll ALeRCE, ATLAS, ASAS-SN, AAVSO, Gaia, and TNS for new transients and variable-star alerts; trigger rescoring when new targets appear |
+| `replan` | Every 120 min | Rescore every active target against every active node; regenerate CHORUS observation plans for the whole fleet |
+| `aavso-batch` | Every 360 min | Assemble accepted photometry measurements into AAVSO Extended File Format and submit to WebObs |
+| `maintenance` | Daily | Prune raw images older than the retention window, generate night summaries, refresh node performance metrics, and (if enabled) run the CHORUS T0 ledger update and the Claude weight-tuning monitor |
+
+The loop intervals are configurable in `cloud/config.yaml` under `alerts.interval_minutes`, `scheduler.replan_interval_minutes`, and `aavso.batch_interval_minutes`.
+
+## Database
+
+The cloud server uses PostgreSQL accessed through a connection pool. On startup, `db.init()` creates the full schema if it does not exist, then runs all column migrations idempotently — so you can upgrade a running deployment by restarting without any manual `ALTER TABLE` steps.
+
+Core tables: `nodes`, `targets`, `scores`, `plans`, `measurements`, `aavso_batches`, `interrupts`, `tuning_state`, `weight_history`, and the CHORUS-specific ledger tables (`chorus_node_ledger`, `chorus_target_state`, `chorus_site_calibration`, `chorus_run_archive`).
+
+## Seeding Demo Data
+
+The server looks best with realistic node locations and a sample light curve. Run the seed script once after starting the server:
+
+```bash
+python3 scripts/seed_demo.py --wipe
+```
+
+This creates 23 nodes across 14 countries plus a light curve for SS Cygni. Nodes are marked online for 15 minutes after seeding — re-run to refresh their status.
+
+## Production Deployment
+
+The repo ships ready-made deployment configs for two platforms:
+
+- **Railway** — `railway.toml` at the project root; one-command deploy via the Railway CLI
+- **Fly.io** — `fly.toml` at the project root; `fly deploy` builds and launches the server
+
+Both platforms inject `DATABASE_URL` automatically. Set `CLOUD_ADMIN_KEY`, `AAVSO_USERNAME`, and `AAVSO_PASSWORD` as environment secrets in the platform dashboard before deploying.
+
+For production use, the server is served through `cloud/wsgi.py` with gunicorn rather than the built-in Flask development server that `python3 -m cloud.main` starts.
+
+<Note>
+CHORUS is the default live scheduler. The config key `scheduler.chorus: true` is set out of the box, so every call to `generate_all_plans` delegates to the CHORUS information-theoretic coordinator described in [CHORUS](/cloud/chorus). To fall back to the legacy greedy packer at any time, set `scheduler.chorus: false` — no restart of background infrastructure is required.
+</Note>

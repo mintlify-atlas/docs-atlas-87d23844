@@ -1,0 +1,434 @@
+---
+title: "Public API Endpoints: Network Status and Photometry Data"
+sidebarTitle: "Public Endpoints"
+description: "No-auth REST endpoints for public consumers — active target queue, historical light curves, live network status, weather forecasts, and light pollution data."
+---
+
+Public endpoints require no authentication and are intended for use by the marketing site, community dashboards, third-party integrations, and anyone curious about The Telescope Net's live science output. They cover the active observing target queue with composite scores, historical photometry for any named variable star, real-time network health, astronomy weather forecasts, and sky brightness data. All responses are JSON and include permissive CORS headers so browser clients can call them directly.
+
+---
+
+## GET /api/v1/targets
+
+Retrieve the active target queue with current observability scores. Returns up to 200 targets sorted by best composite score descending, including the science program classification and a per-score-component explanation.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** None
+
+    No query parameters required.
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="targets" type="array">
+      Array of active target objects.
+
+      <Expandable title="Target fields">
+        <ResponseField name="target_id" type="string">Unique target identifier.</ResponseField>
+        <ResponseField name="name" type="string">Target name as used in AAVSO, e.g. `"SS_CYG"`.</ResponseField>
+        <ResponseField name="ra_deg" type="float">Right ascension in decimal degrees (J2000).</ResponseField>
+        <ResponseField name="dec_deg" type="float">Declination in decimal degrees (J2000).</ResponseField>
+        <ResponseField name="target_type" type="string">Classification: `SN`, `CV`, `TDE`, `VAR`, `EB`, `AGN`, `GRB`, `NOVA`, `EXOPLANET`, or `unknown`.</ResponseField>
+        <ResponseField name="mag" type="float">Latest reported magnitude.</ResponseField>
+        <ResponseField name="priority" type="float">Scientific value baseline, 0–1.</ResponseField>
+        <ResponseField name="time_critical" type="boolean">`true` for targets requiring rapid cadence (supernovae, GRBs, novae).</ResponseField>
+        <ResponseField name="best_score" type="float">Highest composite observability score across all active nodes.</ResponseField>
+        <ResponseField name="best_node_id" type="string">Node with the highest score for this target.</ResponseField>
+        <ResponseField name="science_program" type="string">Mapped program name: `"transient_follow_up"`, `"variable_stars"`, `"exoplanet_transits"`, or `"other"`.</ResponseField>
+        <ResponseField name="score_explanation" type="object">Per-component score breakdown from the best-scoring node.</ResponseField>
+        <ResponseField name="sources" type="array">Alert broker sources that contributed this target, e.g. `["alerce", "gaia"]`.</ResponseField>
+        <ResponseField name="n_measurements" type="integer">Total photometry measurements collected for this target.</ResponseField>
+        <ResponseField name="discovered_at" type="string">ISO 8601 UTC timestamp of first alert.</ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl https://api.thetelescope.net/api/v1/targets
+    ```
+
+    ```json
+    {
+      "targets": [
+        {
+          "target_id": "tgt_ss_cyg",
+          "name": "SS_CYG",
+          "ra_deg": 325.679,
+          "dec_deg": 43.587,
+          "target_type": "CV",
+          "mag": 11.4,
+          "priority": 0.85,
+          "time_critical": false,
+          "best_score": 0.91,
+          "best_node_id": "node_a3f9b2c1",
+          "science_program": "variable_stars",
+          "sources": ["aavso_alerts"],
+          "n_measurements": 4821,
+          "discovered_at": "2024-03-01T00:00:00+00:00"
+        }
+      ]
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## GET /api/v1/lightcurves/{name}
+
+Retrieve the historical photometry light curve for a named target. All measurements from all network nodes are returned, giving a multi-site composite view of the target's brightness history.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** None
+
+    <ParamField path="name" type="string" required>
+      Target name, e.g. `SS_Cyg` or `SN2024abc`. URL-encode spaces and special characters.
+    </ParamField>
+
+    <ParamField query="days" type="float">
+      Look-back window in days. Default `365`. Use smaller values (e.g. `30`) for responsive real-time plots.
+    </ParamField>
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="target" type="string">Target name as requested.</ResponseField>
+    <ResponseField name="n" type="integer">Number of data points returned.</ResponseField>
+    <ResponseField name="points" type="array">
+      Array of photometry points.
+
+      <Expandable title="Point fields">
+        <ResponseField name="bjd" type="float">Barycentric Julian Date.</ResponseField>
+        <ResponseField name="magnitude" type="float">Measured magnitude.</ResponseField>
+        <ResponseField name="uncertainty" type="float">1-σ photometric uncertainty.</ResponseField>
+        <ResponseField name="filter" type="string">Photometric filter used.</ResponseField>
+        <ResponseField name="node_id" type="string">Node that produced this measurement.</ResponseField>
+        <ResponseField name="quality_flag" type="string">`"good"`, `"acceptable"`, or `"poor"`.</ResponseField>
+        <ResponseField name="validation_status" type="string">`"consistent"`, `"outlier"`, or `"single"` from cross-validation.</ResponseField>
+        <ResponseField name="aavso_submitted" type="integer">`1` if this point was sent to AAVSO.</ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl "https://api.thetelescope.net/api/v1/lightcurves/SS_Cyg?days=30"
+    ```
+
+    ```json
+    {
+      "target": "SS_Cyg",
+      "n": 312,
+      "points": [
+        {
+          "bjd": 2460476.5123,
+          "magnitude": 11.42,
+          "uncertainty": 0.018,
+          "filter": "CV",
+          "node_id": "node_a3f9b2c1",
+          "quality_flag": "good",
+          "validation_status": "consistent",
+          "aavso_submitted": 1
+        }
+      ]
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## GET /api/v1/lightcurves/{name}/consensus
+
+Retrieve an inverse-variance-weighted consensus light curve for epochs where two or more nodes observed the same target within the same ~43-minute co-temporal window. Each consensus point reports how many nodes contributed and which nodes they were.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** None
+
+    <ParamField path="name" type="string" required>Target name.</ParamField>
+    <ParamField query="days" type="float">Look-back window in days. Default `365`.</ParamField>
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="target" type="string">Target name as requested.</ResponseField>
+    <ResponseField name="n" type="integer">Number of consensus epochs.</ResponseField>
+    <ResponseField name="points" type="array">
+      Weighted consensus photometry points with `n_nodes` and `node_ids` fields showing network coverage.
+    </ResponseField>
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl "https://api.thetelescope.net/api/v1/lightcurves/SS_Cyg/consensus?days=90"
+    ```
+
+    ```json
+    {
+      "target": "SS_Cyg",
+      "n": 47,
+      "points": [
+        {
+          "bjd": 2460476.515,
+          "magnitude": 11.441,
+          "uncertainty": 0.009,
+          "filter": "CV",
+          "n_nodes": 3,
+          "node_ids": ["node_a3f9b2c1", "node_b7e2d4f0", "node_c1a9e3b5"]
+        }
+      ]
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## GET /api/v1/network/status
+
+Retrieve a live snapshot of the network's node count, observation totals, and node locations. Used by the marketing site to display the live statistics ticker.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** None
+
+    No query parameters required.
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="nodes_total" type="integer">Total registered node count.</ResponseField>
+    <ResponseField name="nodes_online" type="integer">Nodes currently heartbeating (active within the last 15 minutes).</ResponseField>
+    <ResponseField name="active_targets" type="integer">Active targets in the science queue.</ResponseField>
+    <ResponseField name="measurements_total" type="integer">Lifetime photometry measurement count.</ResponseField>
+    <ResponseField name="measurements_24h" type="integer">Measurements received in the past 24 hours.</ResponseField>
+    <ResponseField name="aavso_submitted" type="integer">Total measurements submitted to AAVSO WebObs.</ResponseField>
+    <ResponseField name="nodes" type="array">Public view of all node records (no API keys or owner emails).</ResponseField>
+    <ResponseField name="server_time" type="string">ISO 8601 UTC timestamp of this response.</ResponseField>
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl https://api.thetelescope.net/api/v1/network/status
+    ```
+
+    ```json
+    {
+      "nodes_total": 28,
+      "nodes_online": 12,
+      "active_targets": 47,
+      "measurements_total": 84203,
+      "measurements_24h": 1423,
+      "aavso_submitted": 76421,
+      "server_time": "2026-06-15T03:00:00.000000+00:00",
+      "nodes": [
+        {
+          "node_id": "node_a3f9b2c1",
+          "latitude": 30.2672,
+          "longitude": -97.7431,
+          "city": "Austin",
+          "online": true
+        }
+      ]
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## GET /api/v1/health
+
+Verify that the API server and its database connection are healthy. Use this endpoint in uptime monitors and deployment health checks.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** None
+
+    No query parameters required.
+  </Tab>
+  <Tab title="Response">
+    **200 OK** — Database is reachable.
+
+    **503 Service Unavailable** — Database connection failed.
+
+    <ResponseField name="ok" type="boolean">`true` when the database is accessible.</ResponseField>
+    <ResponseField name="db" type="boolean">Database connectivity check result.</ResponseField>
+    <ResponseField name="server_time" type="string">ISO 8601 UTC timestamp.</ResponseField>
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl https://api.thetelescope.net/api/v1/health
+    ```
+
+    ```json
+    {
+      "ok": true,
+      "db": true,
+      "server_time": "2026-06-15T03:00:00.000000+00:00"
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## GET /api/v1/weather
+
+Retrieve an astronomy-optimised weather forecast for any coordinates. Data is sourced from the 7timer ASTRO product, which provides 3-hour forecast slots for cloud cover, atmospheric seeing, transparency, lifted index, wind speed, and humidity — the parameters that matter most for photometric quality.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** None
+
+    <ParamField query="lat" type="float" required>
+      Latitude in decimal degrees, e.g. `30.2672`.
+    </ParamField>
+
+    <ParamField query="lon" type="float" required>
+      Longitude in decimal degrees, e.g. `-97.7431`.
+    </ParamField>
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="source" type="string">Data source identifier: `"7timer_astro"`.</ResponseField>
+    <ResponseField name="latitude" type="float">Requested latitude.</ResponseField>
+    <ResponseField name="longitude" type="float">Requested longitude.</ResponseField>
+    <ResponseField name="slots" type="array">
+      Array of 3-hour forecast slots.
+
+      <Expandable title="Slot fields">
+        <ResponseField name="time" type="string">ISO 8601 UTC start time of this slot.</ResponseField>
+        <ResponseField name="cloud_cover_pct" type="float">Cloud cover percentage (0–100).</ResponseField>
+        <ResponseField name="seeing" type="float">Atmospheric seeing index (7timer scale: 1=excellent, 8=very bad).</ResponseField>
+        <ResponseField name="transparency" type="float">Atmospheric transparency index.</ResponseField>
+        <ResponseField name="lifted_index" type="float">Lifted index — negative values indicate atmospheric instability.</ResponseField>
+        <ResponseField name="wind_kmh" type="float">Wind speed in km/h.</ResponseField>
+        <ResponseField name="humidity_pct" type="float">Relative humidity percentage.</ResponseField>
+      </Expandable>
+    </ResponseField>
+
+    **400** is returned when `lat` or `lon` are missing or non-numeric.
+
+    **503** is returned when the upstream weather provider is unavailable.
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl "https://api.thetelescope.net/api/v1/weather?lat=30.2672&lon=-97.7431"
+    ```
+
+    ```json
+    {
+      "source": "7timer_astro",
+      "latitude": 30.2672,
+      "longitude": -97.7431,
+      "slots": [
+        {
+          "time": "2026-06-15T21:00:00+00:00",
+          "cloud_cover_pct": 5.0,
+          "seeing": 2,
+          "transparency": 7,
+          "lifted_index": 2.0,
+          "wind_kmh": 8.0,
+          "humidity_pct": 38.0
+        }
+      ]
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## GET /api/v1/light-pollution
+
+Retrieve sky brightness data for any coordinates. Returns the magnitude-per-square-arcsecond (mpsas) reading and Bortle scale classification. The server caches results per location for 7 days to avoid upstream rate limits.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** None
+
+    <ParamField query="lat" type="float" required>
+      Latitude in decimal degrees.
+    </ParamField>
+
+    <ParamField query="lon" type="float" required>
+      Longitude in decimal degrees.
+    </ParamField>
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="latitude" type="float">Requested latitude.</ResponseField>
+    <ResponseField name="longitude" type="float">Requested longitude.</ResponseField>
+    <ResponseField name="mpsas" type="float">Sky brightness in magnitudes per square arcsecond. Higher is darker: rural skies typically 21–22, suburban 18–20, urban under 17.</ResponseField>
+    <ResponseField name="bortle" type="integer">Bortle scale classification, 1 (darkest) to 9 (inner city).</ResponseField>
+    <ResponseField name="source" type="string">Data source used, e.g. `"light_pollution_map"` or `"viirs"`.</ResponseField>
+    <ResponseField name="radiance_nw_cm2_sr" type="float">Raw radiance value in nW/cm²/sr if available from the data source.</ResponseField>
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl "https://api.thetelescope.net/api/v1/light-pollution?lat=30.2672&lon=-97.7431"
+    ```
+
+    ```json
+    {
+      "latitude": 30.2672,
+      "longitude": -97.7431,
+      "mpsas": 18.9,
+      "bortle": 6,
+      "source": "light_pollution_map",
+      "radiance_nw_cm2_sr": 1.42
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## GET /api/v1/objects/{object_name}
+
+Retrieve public catalogue details for any astronomical object by name. The server queries the CDS Sesame name resolver and, for planetary systems, the NASA Exoplanet Archive. Results are merged into a single response.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** None
+
+    <ParamField path="object_name" type="string" required>
+      Object name, e.g. `SS_Cyg`, `SN2024abc`, or `HD 189733 b`. URL-encode as needed.
+    </ParamField>
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="name" type="string">Requested name.</ResponseField>
+    <ResponseField name="canonical_name" type="string">Canonical name from Sesame.</ResponseField>
+    <ResponseField name="ra_deg" type="float">Right ascension (J2000) from Sesame.</ResponseField>
+    <ResponseField name="dec_deg" type="float">Declination (J2000) from Sesame.</ResponseField>
+    <ResponseField name="object_type" type="string">Sesame object type string.</ResponseField>
+    <ResponseField name="magnitudes" type="object">Band-keyed magnitude dictionary, e.g. `{"V": "8.12", "B": "9.04"}`.</ResponseField>
+    <ResponseField name="aliases" type="array">Up to 12 known aliases from Sesame.</ResponseField>
+    <ResponseField name="public_sources" type="array">List of data source names used to build this response.</ResponseField>
+    <ResponseField name="errors" type="array">Non-fatal errors from individual lookups (e.g. a source being temporarily unavailable).</ResponseField>
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl https://api.thetelescope.net/api/v1/objects/SS_Cyg
+    ```
+
+    ```json
+    {
+      "name": "SS_Cyg",
+      "canonical_name": "SS Cyg",
+      "ra_deg": 325.6785,
+      "dec_deg": 43.5861,
+      "object_type": "CV*",
+      "magnitudes": {"V": "7.70", "B": "8.41"},
+      "aliases": ["CSS_J214143.5+433512", "AAVSO 2138+43"],
+      "public_sources": ["CDS Sesame"],
+      "errors": []
+    }
+    ```
+  </Tab>
+</Tabs>

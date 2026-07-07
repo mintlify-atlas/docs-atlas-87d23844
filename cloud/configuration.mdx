@@ -1,0 +1,228 @@
+---
+title: "Cloud Server Configuration Reference"
+sidebarTitle: "Configuration"
+description: "Complete reference for cloud/config.yaml — AAVSO credentials, server settings, database path, alert sources, scoring weights, and Claude weight tuning parameters."
+---
+
+All cloud server behaviour is controlled by a single file: `cloud/config.yaml`. The server reads it at startup through `load_config()`, which recursively expands `${VAR}` references from the environment — so secrets never need to be committed to the file itself. This page documents every section and parameter.
+
+<Warning>
+`server.admin_key` must be changed from the default placeholder before any production deployment. The admin key protects endpoints that can trigger ingestion, regenerate plans, and modify scoring weights. Set it via the `CLOUD_ADMIN_KEY` environment variable.
+</Warning>
+
+## server
+
+Controls the Flask API binding and authentication.
+
+```yaml
+server:
+  host: 0.0.0.0
+  port: 8800
+  admin_key: '${CLOUD_ADMIN_KEY}'
+```
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `host` | `0.0.0.0` | Interface the Flask server binds to. `0.0.0.0` makes the API publicly reachable — restrict to `127.0.0.1` for local-only access |
+| `port` | `8800` | TCP port. The `PORT` environment variable overrides this, which Railway and Fly.io set automatically |
+| `admin_key` | *(required)* | Secret header value for `X-Admin-Key` — authenticates admin API routes such as `/api/v1/admin/ingest` and `/api/v1/admin/replan` |
+
+## aavso
+
+Credentials and submission behaviour for AAVSO WebObs.
+
+```yaml
+aavso:
+  observer_code: 'EGBA'
+  username: '${AAVSO_USERNAME}'
+  password: '${AAVSO_PASSWORD}'
+  chart_id: ''
+  dry_run: false
+  batch_interval_minutes: 360
+  single_node_holdback_hours: 6
+  audit_dir: cloud_data/aavso_batches
+```
+
+| Parameter | Description |
+|-----------|-------------|
+| `observer_code` | Your AAVSO OBSCODE — appears in every submitted observation record |
+| `username` / `password` | AAVSO login credentials used to authenticate against WebObs |
+| `chart_id` | Optional AAVSO chart identifier; leave blank to omit from submissions |
+| `dry_run` | When `true`, the batch assembler formats the Extended File Format output but does not POST to WebObs — useful for verifying formatting before a live submission |
+| `batch_interval_minutes` | How often (in minutes) the `aavso-batch` background loop runs; default 360 (every 6 hours) |
+| `single_node_holdback_hours` | A measurement from a single node is held back this many hours to allow cross-validation against other nodes before submission |
+| `audit_dir` | Directory where batch files are written before and after submission |
+
+## database
+
+```yaml
+database:
+  url: 'postgresql://user@host/dbname'
+```
+
+The `url` value falls back to the `DATABASE_URL` environment variable if blank, which is how Railway and Fly.io inject it automatically. The full PostgreSQL connection string (including credentials) should be supplied via the environment rather than committed to the file.
+
+## alerts
+
+```yaml
+alerts:
+  interval_minutes: 60
+  expire_days: 45
+  alerce:
+    enabled: true
+    mag_limit: 16.0
+    days_back: 14
+  gaia:
+    enabled: true
+    mag_limit: 16.0
+    days_back: 30
+  tns:
+    enabled: true
+    api_key: ''
+    bot_id: ''
+    bot_name: ''
+    mag_limit: 16.5
+    days_back: 7
+  atlas:
+    enabled: true
+    mag_limit: 16.5
+    username: ''
+    password: ''
+  asassn:
+    enabled: true
+    mag_limit: 16.5
+    api_key: ''
+  aavso:
+    enabled: true
+    default_watchlist: true
+    vsx_names: []
+```
+
+`interval_minutes` controls how often the `alert-ingest` loop fires. `expire_days` deactivates transients that have not been seen by any source within that window. Each broker section has `enabled`, a `mag_limit` that caps how faint the ingested targets can be, and `days_back` controlling the historical lookback on each poll. TNS, ATLAS, and ASAS-SN require separate credentials — sources with blank credentials are skipped automatically without error.
+
+## scoring
+
+The scoring section contains two sets of weights: the **composite weights** that blend six target-level factors into a single score, and the **observability sub-weights** that are blended into the `observe` component of that composite.
+
+### Composite weights
+
+```yaml
+scoring:
+  weights:
+    brightness: 0.20
+    science:    0.25
+    time:       0.15
+    coverage:   0.15
+    observe:    0.25
+    roi:        0.10
+```
+
+| Weight | Role |
+|--------|------|
+| `brightness` | How well the target's magnitude falls within the node's dynamic range |
+| `science` | Target priority set by the alert source or campaign programme |
+| `time` | Urgency — fresh transients score high on day 0 and decay over ~12 days |
+| `coverage` | Blends short-term recency (40 %) with long-term historical neglect weighted by science priority (60 %) |
+| `observe` | Composite observability score (see sub-weights below) |
+| `roi` | Science yield: blends AAVSO acceptance rate, cadence-gap closure, and time-critical success over the last 90 days |
+
+### Observability sub-weights
+
+```yaml
+scoring:
+  observability_weights:
+    light_pollution: 0.20
+    weather:         0.25
+    moon:            0.15
+    airmass:         0.15
+    window:          0.15
+    telescope:       0.10
+```
+
+These weights are **seed values only**. The live values are stored in the `tuning_state` database table and read fresh on every scoring run via `tuning.active_obs_weights()`. When the Claude weight-tuning monitor is enabled, it can adjust these values nightly within the trust-region bounds described in the `tuning` section.
+
+| Sub-weight | Role |
+|------------|------|
+| `light_pollution` | Sky brightness penalty scaled to target magnitude — bright targets tolerate light pollution; faint ones require dark skies (mpsas 22 = pristine, 17 = inner city) |
+| `weather` | Composite night-level weather score blending cloud cover, seeing, and atmospheric transparency from 7timer ASTRO and Open-Meteo forecasts |
+| `moon` | Penalty for lunar interference — scales with illumination and angular separation between the moon and the target at midnight |
+| `airmass` | Atmospheric extinction penalty — best airmass X=1 scores 1.0; X=3 scores 0 |
+| `window` | Fraction of the dark window the target is above the node's minimum altitude — at least 4 hours visible scores 1.0 |
+| `telescope` | Hardware suitability: aperture-limited magnitude headroom, field-of-view match to the target class |
+
+## tuning
+
+The nightly weight-tuning monitor reviews observation outcomes and proposes small adjustments to the scoring weights. It ships disabled and is entirely opt-in.
+
+```yaml
+tuning:
+  enabled: false
+  api_key: ''
+  model: claude-opus-4-8
+  lookback_nights: 14
+  max_delta: 0.05
+  max_delta_coord: 0.15
+  min_nights_data: 7
+  min_measurements: 30
+  min_change: 0.005
+```
+
+| Parameter | Description |
+|-----------|-------------|
+| `enabled` | Set `true` to activate the nightly Claude advisory monitor. Defaults to `false` — behavior is identical to static weights when disabled |
+| `api_key` | Anthropic API key. Leave blank to fall back to the `ANTHROPIC_API_KEY` environment variable |
+| `model` | Claude model used for weight proposals. `claude-opus-4-8` by default; set `claude-sonnet-4-6` to reduce cost |
+| `lookback_nights` | How many nights of observation outcomes the monitor analyses per run |
+| `max_delta` | Trust-region clamp — no single weight in any normalized group can move more than this per night (0.05 = ±5 %) |
+| `max_delta_coord` | Fractional step cap for scalar coordination knobs and CHORUS hyperparameters (0.15 = ±15 % of current value) |
+| `min_nights_data` | Tuning is skipped until at least this many nights of data exist |
+| `min_measurements` | Tuning is skipped until at least this many measurements have been recorded |
+| `min_change` | If no weight in any group moves more than this amount, the run is considered a no-op and no audit row is written |
+
+<Note>
+The `ANTHROPIC_API_KEY` environment variable must be set (or `tuning.api_key` filled in) for the monitor to make any Claude calls. If no key is found, the tuning step silently skips and all weights remain unchanged. The hot path — alert ingestion, composite scoring, and CHORUS plan generation — never calls Claude regardless of this setting.
+</Note>
+
+## scheduler
+
+```yaml
+scheduler:
+  chorus: true
+  chorus_shadow: false
+  network_optimizer: false
+  local_search_ms: 1500
+  replan_interval_minutes: 120
+  min_score: 0.25
+  max_targets_per_night: 12
+  sun_altitude_limit: -12
+```
+
+| Parameter | Description |
+|-----------|-------------|
+| `chorus` | `true` enables CHORUS as the live scheduler (default). Set `false` for instant rollback to the legacy path |
+| `chorus_shadow` | Runs the full CHORUS pipeline alongside the incumbent, recording telemetry and backtest archive without saving plans — the staged rollout path |
+| `local_search_ms` | Budget in milliseconds for the seeded deterministic local-search refinement after the greedy assignment pass |
+| `replan_interval_minutes` | How often the `replan` loop fires |
+| `min_score` | Targets scoring below this threshold are never scheduled |
+| `sun_altitude_limit` | Sun altitude in degrees defining the start and end of the observing window (−12 = nautical darkness) |
+
+## Database Schema
+
+The schema is created automatically by `db.init()` on startup and all column migrations are applied idempotently — no manual DDL is ever needed.
+
+| Table | Purpose |
+|-------|---------|
+| `nodes` | One row per registered telescope — location, hardware capability, autonomy flags, and nightly-recomputed performance metrics |
+| `targets` | Active observation targets ingested from alert brokers |
+| `scores` | Latest composite score for every (target, node) pair, with component breakdown |
+| `plans` | Current and superseded observation plans per node, stored as JSON |
+| `measurements` | Photometry results uploaded by node agents |
+| `aavso_batches` | Submission batch records with accept/reject counts |
+| `interrupts` | High-priority target alerts broadcast to nodes |
+| `tuning_state` | Single row holding live scoring weights and CHORUS hyperparameters for all tunable groups |
+| `weight_history` | Audit trail of every weight change — includes old values, new values, Claude rationale, and evidence digest |
+| `chorus_node_ledger` | Per-node Beta posteriors for p_exec, p_accept, κ, and site weather calibration |
+| `chorus_target_state` | Per-target cross-night state: EB phase-coverage vectors, CV hazard clocks, transient segment tracking |
+| `chorus_run_archive` | Frozen opportunity inputs and realized outcomes per night — the data source for the Ring-1 backtest gate |
+
+The migration system (`_COLUMN_MIGRATIONS` in `db.py`) adds new columns to existing tables with `ALTER TABLE … ADD COLUMN IF NOT EXISTS`, so upgrading a production database is always a safe restart.

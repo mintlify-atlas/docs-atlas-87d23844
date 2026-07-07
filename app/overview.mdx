@@ -1,0 +1,144 @@
+---
+title: "Member App: Accessible Astronomy on iOS, Android, and Web"
+sidebarTitle: "Overview"
+description: "The Telescope Net Flutter app gives members real-time telescope status, observation history, AI-powered help, and science program suggestions — built accessibility-first for all abilities."
+---
+
+The Telescope Net member app is a Flutter application that runs natively on iOS and Android and as a progressive web app (PWA) in any modern browser. It is the primary interface through which members interact with their donated telescope nodes — watching plans form, tracking photometric observations, receiving night summaries, and chatting with an AI help assistant — all without needing to touch a terminal or understand how the pipeline works. Every screen is designed around the principle that astronomy should be available to everyone, regardless of physical ability.
+
+<Note>
+  All data shown in the app comes from the live cloud backend. There are no mock flows or
+  placeholder values in the current main screens — every number and status reflects real
+  observations and real telescope heartbeats.
+</Note>
+
+## Design Principles
+
+The app's interface was shaped by five principles drawn from The Telescope Net's accessibility mission. These are not cosmetic choices — they drive every navigation decision, label, and interaction model in the codebase.
+
+<CardGroup cols={2}>
+  <Card title="Autonomous-First" icon="robot">
+    Every decision starts with whether the network can run without user intervention. The app presents results and status; it never requires the member to act for science to happen.
+  </Card>
+  <Card title="Multiple Modalities" icon="waveform">
+    Every piece of information is available as visual, audio, haptic, and plain text. No single channel is the only path to understanding what your telescope is doing.
+  </Card>
+  <Card title="No Required Precision" icon="hand-pointer">
+    Every interaction is achievable with one finger, a voice command, a single switch, or eye gaze. Touch targets meet or exceed the 44×44 pt minimum. No gesture requires fine motor control.
+  </Card>
+  <Card title="Patience" icon="clock">
+    There are no time limits, no auto-advancing content, and no interactions that expire. The member controls the pace entirely.
+  </Card>
+  <Card title="Plain Language" icon="book-open">
+    Jargon is defined when it is used. A reading level selector lets members choose between child, standard, and expert modes. Audio is available for all text.
+  </Card>
+  <Card title="Consistent Navigation" icon="compass">
+    Navigation structure does not change between sessions. Every interactive element carries a unique label for screen readers. There are no unexpected interruptions or auto-playing content.
+  </Card>
+</CardGroup>
+
+## Screens and Tabs
+
+The signed-in shell (`home_screen.dart`) is a tab bar containing five primary destinations. A persistent alerts badge in the top bar reflects unread notification count. Tapping a night-summary push notification navigates directly to the Notifications sheet.
+
+| Tab | Purpose |
+|-----|---------|
+| **Tonight (Dashboard)** | Live node status banner, tonight's observing plan timeline, Aladin Lite sky field preview locked to the active target, selected target catalogue details, and recent observation rows. Responsive — single-column on mobile, multi-panel workbench layout on wide screens. |
+| **Telescopes (Nodes)** | List of the member's registered telescope nodes. Shows online/offline status, model, location, and last heartbeat age. The + button opens a claim-a-node sheet where members enter their node ID and API key or use a Node Activation Code. Members can name and rename their telescopes. |
+| **History (Observations)** | Photometric measurement history for the last 365 days, with a night-strip at the top for per-night summaries. Drill into any measurement to open the target detail screen showing the light curve. |
+| **Me** | Member profile, cumulative stats (total observations, AAVSO accepted, targets covered), and per-member achievements. Accessible from the sidebar on web. |
+| **More** | Science program suggestions (members can propose new targets/programs via `suggest_program_screen.dart`), settings, and about. |
+
+A **Notifications** sheet is accessible from the alert badge in the app bar and shows alerts, night summaries, and system messages. Individual items can be marked read by tapping.
+
+A **Help** tab (reachable from the More menu and the app bar) surfaces contact links, the AI chat assistant, live node diagnostics, and config patch requests.
+
+## AI Help Assistant
+
+The Help tab includes a conversational assistant powered by Claude Haiku (via OpenRouter). Members can ask questions about their telescope node's status, auto-run settings, safety blocks, or anything else related to their observations. The assistant has access to the member's node list and tonight's observing timeline to give contextually accurate answers.
+
+```
+Weekly message limit: 5 messages per member per week
+Model: Claude Haiku (via OpenRouter)
+Endpoint: POST /api/v1/me/help/chat
+```
+
+When the assistant identifies a safe configuration change that would help the member — for example, adjusting a scheduling note or toggling a feature flag — it can queue a `config.yaml` patch for the node agent. The patch appears in the chat as a "Config change queued" notice and is applied on the node's next cloud poll, without requiring the member to edit any files directly.
+
+<Note>
+  If the help endpoint is not yet live on the server, the assistant section shows a banner
+  directing the member to email support. Contact links and node diagnostics remain
+  fully functional in all cases.
+</Note>
+
+## Aladin Sky Visualization
+
+The Dashboard tab embeds Aladin Lite for live sky field previews. When tonight's observing plan includes a target with known RA/Dec coordinates, the field preview panel locks to that position and renders a 12° field-of-view DSS2 image with a crosshair overlay. Without an active pointing solution, the view drifts slowly across the sky as an ambient visualization. The field preview transitions smoothly as the member taps different plan items in the timeline.
+
+## Push Notifications
+
+The app uses Firebase Cloud Messaging (`firebase_messaging`) for push notifications. On first launch the app requests a device token and registers it with the cloud via `PUT /api/v1/me/notifications/prefs`. The cloud dispatches night summary notifications after each observing session. Tapping a `night_summary` notification navigates the member directly to the Notifications tab.
+
+Firebase is initialized in `main.dart` with a graceful fallback — if `firebase_options.dart` still contains placeholder values, the app runs normally without push support rather than crashing.
+
+## Accessibility Features
+
+The app was built accessibility-first, not retrofitted. Every feature below is active in the current codebase.
+
+<Tabs>
+  <Tab title="Visual">
+    - Full **VoiceOver** (iOS) and **TalkBack** (Android) support — every interactive element and stat is wrapped in `Semantics`
+    - Enlarged default type scale (1.1×) and high-contrast night-sky palette
+    - **Dynamic text sizing** honours the system font size preference
+    - **High contrast mode** and **reduced motion mode**
+    - **Color-blind safe palette** — status is conveyed by icon plus text, never color alone
+    - **Alt text** on all images and data visualizations
+    - Text and table alternatives for all charts
+    - **Dark mode** (the default theme)
+    - **OpenDyslexic font** option
+  </Tab>
+  <Tab title="Motor">
+    - **Single-tap navigation** throughout — no multi-step gesture required for any primary action
+    - **Switch control** compatible
+    - **Voice control** with unique semantic labels on all interactive elements
+    - **Eye gaze** compatible — touch targets are ≥ 44×44 pt (48 dp on Android), buttons are full-width and 56 dp tall
+    - **No time-limited interactions** — nothing expires or auto-advances
+    - No required motion gestures (accelerometer features are opt-in)
+  </Tab>
+  <Tab title="Cognitive">
+    - **Consistent navigation structure** — tabs do not move or reorder between sessions
+    - **Plain language** throughout with a reading level selector (child / standard / expert)
+    - **Jargon definitions** on tap
+    - No unexpected interruptions or auto-playing content
+    - **Reduce visual complexity** mode
+  </Tab>
+  <Tab title="Hearing">
+    - No audio-only information — all sounds have visual equivalents
+    - **Vibration alternatives** for audio alerts
+    - No audio-only data paths
+  </Tab>
+  <Tab title="Novel">
+    - **Audio descriptions** of all data (three depth levels) via `flutter_tts`
+    - **Light curve sonification** — hear how a star's brightness changed over a night
+    - **Haptic light curves** — feel the brightness pattern through vibration via the `vibration` package
+    - **Spatial audio sky map** — hold the phone up and hear which objects are overhead, powered by `sensors_plus`
+    - **Proxy observation support** — caregivers can configure nodes; the member receives all results
+  </Tab>
+</Tabs>
+
+## Key Flutter Packages
+
+The following packages from `pubspec.yaml` provide the core capabilities described above:
+
+| Package | Role |
+|---------|------|
+| `fl_chart ^0.70.0` | Photometric light curves and stat charts |
+| `flutter_tts ^4.0.0` | Audio descriptions of data, sonification |
+| `vibration ^2.0.0` | Haptic light curves and alert patterns |
+| `sensors_plus` | Accelerometer for the spatial audio sky map |
+| `firebase_core ^3.0.0` + `firebase_messaging ^15.0.0` | Push notifications |
+| `http ^1.2.0` | Cloud API client (`api_client.dart`) |
+| `provider ^6.1.2` | App-wide state management (`app_state.dart`) |
+| `shared_preferences ^2.2.3` | Bearer token persistence (`auth_store.dart`) |
+| `url_launcher ^6.3.0` | External links from the Help contact card |
+| `geolocator ^13.0.0` | Location for node registration |

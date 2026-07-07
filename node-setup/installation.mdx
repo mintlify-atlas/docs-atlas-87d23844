@@ -1,0 +1,304 @@
+---
+title: "Install the Node Agent on Windows, macOS, and Linux"
+sidebarTitle: "Installation"
+description: "Detailed installation instructions for the Telescope Net Node Agent on all supported platforms, including installer options, service registration, and sleep prevention configuration."
+---
+
+The Node Agent ships in two forms: a **pre-built installer** for most users, and a **dev-mode source install** for contributors and anyone who wants to run from the latest code. Both paths end up at the same place — a running Flask dashboard on port 5173 with the ALPACA control loop, photometry pipeline, and cloud communicator all active.
+
+Choose the path that suits you, then follow the platform-specific instructions below.
+
+---
+
+## Requirements
+
+Before installing, make sure you have:
+
+- **Python 3.10 or later** (dev-mode only; bundled in pre-built installers)
+- **ASTAP plate-solver** + **G18 star catalogue** (required for photometry)
+- A Seestar S50 or S30 on your home WiFi in **Station Mode**
+- A **Node Activation Code** (`BS-YYYY-XXXXXXXX`) from your member account
+
+---
+
+## ASTAP Plate-Solver
+
+ASTAP is required for all plate-solving and photometry. Without it the pipeline cannot identify your field of view and no magnitude measurements are produced.
+
+1. Download ASTAP from **[https://www.hnsky.org/astap.htm](https://www.hnsky.org/astap.htm)**
+2. Install the binary for your platform
+3. Download and install the **G18 star catalogue** from the same page (~6 GB)
+
+<Note>
+  Pre-built installers bundle the ASTAP binary automatically. The G18 catalogue
+  is **not** bundled because of its size — the dashboard setup wizard prompts
+  you to download it on first run. For dev-mode installs you must install both
+  manually and set `photometry.astap_path` in `config.yaml` if the binary is
+  not on your system `PATH`.
+</Note>
+
+---
+
+## Pre-Built Installers (Recommended)
+
+The pre-built installers package the Node Agent as a **PyInstaller one-file executable**, register it as a system service, and configure sleep prevention — everything is handled for you.
+
+<Tabs>
+  <Tab title="Windows">
+    ### Windows Installer (NSIS + NSSM)
+
+    **Download:** `BoundlessSkiesNode-Setup.exe` from
+    [thetelescope.net/download](https://thetelescope.net/download)
+
+    **What the installer does:**
+
+    1. Extracts the Node Agent executable to `%ProgramFiles%\TelescopeNetNode\`
+    2. Prompts for your **Node Activation Code** and writes it to `config.yaml`
+    3. Registers the agent as a **Windows service** via
+       [NSSM](https://nssm.cc/) — auto-starts at boot, restarts on crash
+    4. Calls `powercfg /change standby-timeout-ac 0` to disable AC-power idle
+       sleep so your computer stays on through the night
+
+    **Service management:**
+
+    ```powershell
+    # Check service status
+    sc query TelescopeNetNode
+
+    # Start / stop / restart
+    net start TelescopeNetNode
+    net stop TelescopeNetNode
+    nssm restart TelescopeNetNode
+
+    # View logs (written to the install directory)
+    Get-Content "$Env:ProgramFiles\TelescopeNetNode\logs\node_agent.log" -Wait
+    ```
+
+    **Data directory:** `%AppData%\TelescopeNet\NodeAgent\`
+  </Tab>
+
+  <Tab title="macOS">
+    ### macOS Installer (.pkg)
+
+    **Download:** `BoundlessSkiesNode-X.Y.Z-macOS.pkg` from
+    [thetelescope.net/download](https://thetelescope.net/download)
+
+    **What the installer does:**
+
+    1. Installs the Node Agent to `/Applications/TelescopeNetNode/`
+    2. Prompts for your **Node Activation Code** and writes it to `config.yaml`
+    3. Installs a **launchd plist** to
+       `/Library/LaunchDaemons/org.telescopenet.nodeagent.plist` — the service
+       starts at boot and runs as root so it can mount the Seestar SMB share
+    4. Calls `pmset -c sleep 0` to disable AC-power sleep
+
+    **Service management:**
+
+    ```bash
+    # Load / start the service
+    sudo launchctl load /Library/LaunchDaemons/org.telescopenet.nodeagent.plist
+
+    # Stop and unload
+    sudo launchctl unload /Library/LaunchDaemons/org.telescopenet.nodeagent.plist
+
+    # Restart
+    sudo launchctl kickstart -k system/org.telescopenet.nodeagent
+
+    # View logs
+    sudo tail -f /Library/Logs/TelescopeNet/node_agent.log
+    ```
+
+    **Data directory:** `/Library/Application Support/TelescopeNet/NodeAgent/`
+
+    <Note>
+      macOS may prompt you to allow Python in **System Preferences → Privacy &
+      Security → Network** on first run. This is required for ALPACA UDP
+      discovery to function.
+    </Note>
+  </Tab>
+
+  <Tab title="Linux">
+    ### Linux (systemd)
+
+    **One-line install** — downloads and runs the install script, registers the
+    systemd service, and passes your activation code in a single command:
+
+    ```bash
+    curl -sSL https://telescopenet.org/install.sh | sudo bash --code BS-2026-XXXXXXXX
+    ```
+
+    Or run the bundled script manually from the repo:
+
+    ```bash
+    sudo bash build/linux/install.sh --code BS-2026-XXXXXXXX
+    ```
+
+    **What the installer does:**
+
+    1. Creates a dedicated `telescopenet` service user
+    2. Copies the Node Agent binary to `/usr/local/bin/telescopenet-node`
+    3. Installs a **systemd unit** and enables it at boot
+    4. Masks `sleep.target`, `suspend.target`, `hibernate.target`, and
+       `hybrid-sleep.target` so the system stays on overnight
+
+    **Service management:**
+
+    ```bash
+    # Status
+    sudo systemctl status telescopenet
+
+    # Start / stop / restart
+    sudo systemctl start telescopenet
+    sudo systemctl stop telescopenet
+    sudo systemctl restart telescopenet
+
+    # Follow live logs
+    sudo journalctl -u telescopenet -f
+
+    # Enable / disable autostart
+    sudo systemctl enable telescopenet
+    sudo systemctl disable telescopenet
+    ```
+
+    **Data directory:** `/var/lib/telescopenet/`
+  </Tab>
+</Tabs>
+
+---
+
+## Dev-Mode Install (From Source)
+
+Dev mode runs `main.py` directly using a Python virtual environment. The watchdog process in `main.py` monitors `src/dashboard.py` for changes and auto-restarts it — useful when contributing code or debugging.
+
+<Tabs>
+  <Tab title="Windows">
+    ```powershell
+    # 1. Clone the repository
+    git clone https://github.com/telescopenet/node_v1
+    cd node_v1-main
+
+    # 2. Create and activate a virtual environment
+    python -m venv venv
+    .\venv\Scripts\Activate.ps1
+
+    # 3. Install dependencies
+    pip install flask pyyaml numpy astropy pillow requests watchdog photutils astroquery pyongc
+
+    # 4. Configure (see Configuration guide)
+    notepad config.yaml
+
+    # 5. Run in dev mode (auto-restarts on file changes)
+    python main.py
+    ```
+  </Tab>
+
+  <Tab title="macOS">
+    ```bash
+    # 1. Clone the repository
+    git clone https://github.com/telescopenet/node_v1 && cd node_v1-main
+
+    # 2. Create and activate a virtual environment
+    python3 -m venv venv && source venv/bin/activate
+
+    # 3. Install dependencies
+    pip install flask pyyaml numpy astropy pillow requests watchdog photutils astroquery pyongc
+
+    # 4. Configure (see Configuration guide)
+    nano config.yaml
+
+    # 5. Run in dev mode (auto-restarts on file changes)
+    python3 main.py
+    # Dashboard: http://localhost:5173
+    ```
+  </Tab>
+
+  <Tab title="Linux">
+    ```bash
+    # 1. Clone the repository
+    git clone https://github.com/telescopenet/node_v1 && cd node_v1-main
+
+    # 2. Create and activate a virtual environment
+    python3 -m venv venv && source venv/bin/activate
+
+    # 3. Install dependencies
+    pip install flask pyyaml numpy astropy pillow requests watchdog photutils astroquery pyongc
+
+    # 4. Configure (see Configuration guide)
+    nano config.yaml
+
+    # 5. Run in dev mode (auto-restarts on file changes)
+    python3 main.py
+    # Dashboard: http://localhost:5173
+    ```
+  </Tab>
+</Tabs>
+
+### Dev Mode vs. Production Mode
+
+| | Dev mode (`python3 main.py`) | Production (`src/main_service.py`) |
+|---|---|---|
+| Entry point | `main.py` watchdog | `src/main_service.py` directly |
+| File watching | Auto-restarts `src/dashboard.py` on changes | No subprocess — runs in-process |
+| Used by | Installers? | ✗ | ✓ |
+| Suitable for | Development, debugging | Overnight science runs |
+
+When running from the command line in dev mode, use `Ctrl+C` to stop. The
+`SafetyManager` intercepts `SIGINT` and parks the telescope before the
+process exits.
+
+---
+
+## Building Installers From Source
+
+If you want to produce your own installer binaries, use the build script:
+
+```bash
+pip install pyinstaller
+
+# Auto-detect platform and build
+python3 build/build.py
+
+# PyInstaller bundle only (no OS installer wrapper)
+python3 build/build.py --bundle-only
+
+# Download ASTAP binary into build/binaries/ and exit
+python3 build/build.py --download-astap
+```
+
+**Expected outputs:**
+
+| Platform | Output file |
+|----------|-------------|
+| Windows | `dist/BoundlessSkiesNode-Setup.exe` |
+| macOS | `dist/BoundlessSkiesNode-X.Y.Z-macOS.pkg` |
+| Linux | `dist/BoundlessSkiesNode-linux-x86_64` |
+
+Windows builds require NSIS and NSSM on `PATH`. macOS builds require
+Xcode CLI tools. Linux builds produce a standalone binary with no extra
+packaging dependencies.
+
+---
+
+## Sleep Prevention
+
+The Node Agent must keep the host computer awake all night. Each platform uses a different mechanism:
+
+| Platform | Method |
+|----------|--------|
+| **Windows** | `powercfg /change standby-timeout-ac 0` (run by installer) |
+| **macOS** | `pmset -c sleep 0` (run by installer); `caffeinate` also used at runtime |
+| **Linux** | `systemd-inhibit` at runtime; sleep/suspend/hibernate targets masked by installer |
+
+<Warning>
+  If your host computer sleeps during an observation run, the safety manager
+  loses the telescope heartbeat and triggers an emergency park. Make sure
+  sleep prevention is active before leaving the node unattended overnight. On
+  Windows, also check that **hibernate** is disabled in Power Options — it is
+  separate from sleep.
+</Warning>
+
+---
+
+Continue to [Configuration](/node-setup/configuration) to fill in your
+observatory coordinates, AAVSO credentials, and photometry settings before
+your first run.

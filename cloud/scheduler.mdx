@@ -1,0 +1,220 @@
+---
+title: "Nightly Scheduler: How Plans Are Generated"
+sidebarTitle: "Scheduler"
+description: "Understand how the Telescope Net scheduler ingests alerts, scores targets per node, and generates nightly observation plans — including the composite scoring formula and reliability multiplier."
+---
+
+Every night, the Telescope Net cloud server answers the same question for each connected Seestar: which targets should it observe, in what order, and for how long? The answer emerges from a three-stage pipeline — alert ingestion builds the pool of candidates, composite scoring ranks every (target, node) pairing, and the plan generator turns those scores into sequenced observation lists. CHORUS, the default live scheduler, replaces the final stage with an information-theoretic assignment algorithm described on the [CHORUS](/cloud/chorus) page. This page covers the underlying scoring machinery that feeds into both.
+
+## Pipeline Overview
+
+```
+Alert Ingestion  →  Composite Scoring  →  Plan Generation
+(hourly)            (per ingest + replan) (every 120 min)
+```
+
+Alert ingestion runs first and triggers an immediate rescore whenever new targets appear. The `replan` loop fires every 120 minutes independently, rescoring and regenerating plans for the entire fleet even when no new alerts have arrived. The two loops are decoupled so that a slow broker poll never delays plan delivery.
+
+## Alert Sources
+
+The `alert-ingest` background loop polls six sources once per hour:
+
+| Source | What it provides |
+|--------|-----------------|
+| **ALeRCE** | ZTF-based photometric classifier — supernovae, variable stars, active galactic nuclei |
+| **ATLAS** | Asteroid Terrestrial-impact Last Alert System — rapid transients and novae |
+| **ASAS-SN** | All-Sky Automated Survey for Supernovae — bright transients and CVs |
+| **AAVSO alerts** | VSX watchlist targets and community-reported outbursts |
+| **Gaia** | Gaia Science Alerts — photometric transients across the sky |
+| **TNS** | Transient Name Server — classified supernovae and other reported events |
+
+New targets are inserted into the `targets` table with their RA/Dec, magnitude, type, discovery timestamp, and priority. Transients not seen by any source for `expire_days` (default 45) are deactivated automatically.
+
+## Composite Scoring Formula
+
+`scoring.score_all()` computes a score for every (target, node) pair and persists the results to the `scores` table. The composite is:
+
+```
+total = w_brightness · brightness_match
+      + w_science    · scientific_value
+      + w_time       · time_criticality
+      + w_coverage   · coverage_gap
+      + w_observe    · observability
+      + w_roi        · science_roi
+```
+
+All six components are normalised to 0–1 so the weights read directly as relative importance. The default weights are `brightness: 0.20`, `science: 0.25`, `time: 0.15`, `coverage: 0.15`, `observe: 0.25`, `roi: 0.10`.
+
+### Score Components
+
+**`brightness_match`** — how well the target's magnitude sits within the node's usable range. Scores 1.0 near the midpoint of `[mag_bright_limit, mag_faint_limit]`, falling to 0.0 at or beyond the hard limits.
+
+**`scientific_value`** — the target's priority field, set by the alert source or campaign programme. Ranges from 0.0 (low) to 1.0 (critical campaign target).
+
+**`time_criticality`** — urgency based on target type and age. Fresh transients score 1.0 on discovery day and decay with a 12-day half-life toward a floor of 0.3. Non-time-critical targets hold a flat baseline of 0.2.
+
+**`coverage_gap`** — blends two signals: short-term recency (40 %) measuring how long ago the last measurement arrived relative to the target's expected cadence, and long-term historical neglect (60 %) comparing our own observation count against the expected cadence over a 30-day window, further weighted by science priority. When external AAVSO and ALeRCE coverage data is available it is blended equally with internal coverage to prevent targets from appearing neglected simply because the network was clouded out.
+
+**`observability`** — the weighted blend of six site-specific factors described in the next section.
+
+**`science_roi`** — science yield from recent network outcomes: AAVSO acceptance rate (45 %), cadence-gap closure rate (35 %), and timely coverage of time-critical events (20 %) over the last 90 days. Sparse histories are pulled toward 0.5 so new targets remain viable.
+
+### Observability Sub-Weights
+
+The `observe` component is itself a weighted average of six factors, with weights that are live-tuned and stored in the `tuning_state` table:
+
+```yaml
+observability_weights:
+  light_pollution: 0.20
+  weather:         0.25
+  moon:            0.15
+  airmass:         0.15
+  window:          0.15
+  telescope:       0.10
+```
+
+| Factor | Computation |
+|--------|-------------|
+| `light_pollution` | Sky background suitability: bright targets tolerate light pollution; faint ones need dark skies (mpsas 22 = pristine → 1.0; mpsas 17 = inner city → 0.0) |
+| `weather` | Night-mean composite of cloud cover (1 − cloud fraction), atmospheric seeing, and transparency — from 7timer ASTRO data where available, falling back to Open-Meteo cloud cover |
+| `moon` | Lunar interference: scales with illumination × angular proximity at midnight; < 10° separation scores 0.05 regardless |
+| `airmass` | Best achievable airmass over the night: X = 1 → 1.0, X = 3 → 0.0 (linear) |
+| `window` | Fraction of the dark window the target is above `min_altitude_deg`; ≥ 4 hours visible saturates at 1.0 |
+| `telescope` | Hardware match: aperture-limited magnitude headroom and field-of-view suitability to the target class |
+
+A target that is never above the node's minimum altitude horizon at any point in the night scores exactly 0.0 for `observability`, and therefore 0.0 for `total`, regardless of all other factors.
+
+## Reliability Multiplier
+
+The raw composite score is multiplied by a reliability factor that reflects how much science a node has actually delivered to AAVSO, not what it claims it can deliver:
+
+```
+total_score = theoretical_score × (0.5 + 0.5 × reliability_score)
+```
+
+| `reliability_score` | Multiplier | Meaning |
+|---------------------|-----------|---------|
+| 1.0 | × 1.00 | Proven node — no penalty applied |
+| 0.5 | × 0.75 | New or data-sparse node — slight preference for proven peers |
+| 0.0 | × 0.50 | Persistently poor data — still receives some assignments (floor prevents starvation) |
+
+New nodes (fewer than 10 observations) start at **0.50** and converge toward their true value over approximately 20–30 observations.
+
+### Reliability Score Formula
+
+Computed nightly by `registry.refresh_all_performance()` from the `measurements` table:
+
+```
+reliability = 0.40 × aavso_acceptance_rate
+            + 0.25 × (1 − outlier_rate)
+            + 0.20 × min(1, clear_nights_30d / 30)
+            + 0.15 × precision_factor
+
+precision_factor = max(0, 1 − mean_uncertainty / 0.30)
+```
+
+The formula is intentionally multi-dimensional: a node cannot inflate its score by optimising one metric — it must deliver across all four simultaneously. `aavso_acceptance_rate` is the ultimate output measure; `outlier_rate` captures cross-validation disagreement; `clear_nights_30d` combines weather and hardware reliability; `precision_factor` rewards photometric precision up to the AAVSO quality ceiling of 0.30 mag.
+
+## Node Data Model
+
+The scheduler reads the following columns from the `nodes` table when building scores and plans:
+
+<Tabs>
+  <Tab title="Location">
+    | Column | Used for |
+    |--------|---------|
+    | `latitude`, `longitude` | Night window calculation, altitude curve, airmass, moon angle |
+    | `elevation` | Pressure correction for airmass |
+    | `utc_offset_hours` | Twilight times in local clock |
+    | `light_pollution_mpsas` | Sky background noise and faint-target magnitude limit |
+    | `bortle` | Human-readable sky quality label |
+    | `horizon_mask` | JSON `[[alt, az], …]` — local obstructions; targets behind them are never scheduled |
+  </Tab>
+  <Tab title="Hardware">
+    | Column | Used for |
+    |--------|---------|
+    | `tier` | 1 = Seestar broadband, 2 = Filtered BVRI, 3 = Spectroscopy — controls which target classes are assigned |
+    | `aperture_mm` | Faint magnitude limit and integration time scaling |
+    | `fov_deg` | Field-of-view matching and comparison-star ensemble size |
+    | `mount_type` | `alt_az` / `equatorial` — equatorial mounts can take longer sub-frames |
+    | `max_exposure_s` | Sub-frame cap (alt-az field rotation limited) |
+    | `mag_bright_limit`, `mag_faint_limit` | Direct inputs to `brightness_match()` |
+    | `min_altitude_deg` | Hard floor — targets below this are never scheduled |
+    | `filter_set` | JSON array of available filters, e.g. `["CV"]` or `["B","V","R","I"]` |
+  </Tab>
+  <Tab title="Performance">
+    | Column | Formula | Scheduler role |
+    |--------|---------|---------------|
+    | `total_observations` | COUNT(*) in measurements | Activity level — nodes with < 10 stay at neutral 0.50 |
+    | `aavso_accepted` | Submitted and non-outlier | Ultimate science output metric |
+    | `aavso_rejected` | Outlier count | Cross-validation disagreement |
+    | `mean_uncertainty` | AVG(uncertainty) for non-poor | Typical photometric precision |
+    | `clear_nights_30d` | COUNT(DISTINCT date) in last 30 days | Combined weather + hardware reliability |
+    | `outlier_rate` | outliers / total | Data trust indicator |
+    | `reliability_score` | Composite formula above | Multiplier on every score pair |
+  </Tab>
+</Tabs>
+
+## Autonomy Flags
+
+Four boolean columns in the `nodes` table indicate unattended operation capability. The scheduler does not apply a direct numeric penalty for missing flags today, but nodes with all four tend to produce better `clear_nights_30d` and higher `aavso_accepted` counts — which flows directly into their `reliability_score`.
+
+| Flag | Why it matters |
+|------|---------------|
+| `has_dew_heater` | Prevents lens fogging in humid conditions. Without one, a node can fail silently — images blur, plate-solving fails, and the whole night produces no measurements |
+| `has_power_mgmt` | Smart power box lets the node agent remotely cycle a hung Seestar. Without it, a crashed scope means a missed assignment with no recovery until a human intervenes |
+| `has_enclosure` | Dome or minidome — the node can observe through light rain, wind, and heavy dew. Dramatically improves `clear_nights_30d` which feeds the reliability score |
+| `has_ups` | Brief power cuts don't kill the night. Especially relevant for nodes in regions with unstable grid power — protects both `clear_nights_30d` and `aavso_acceptance_rate` |
+
+## Plan Output
+
+The scheduler emits `ObservationPlan` objects (from `src/shared_models.py`) stored as JSON in the `plans` table. Each plan contains a list of `PlanItem` records:
+
+```json
+{
+  "plan_id": "plan_4a7b2c1d3e",
+  "node_id": "node_a3f9b2c1",
+  "night": "2026-07-15",
+  "generated_at": "2026-07-15T20:00:00Z",
+  "items": [
+    {
+      "target": "SS Cyg",
+      "ra_deg": 325.678,
+      "dec_deg": 43.586,
+      "exp_dur": 30.0,
+      "exp_count": 40,
+      "filter": "CV",
+      "scheduled_start": "2026-07-15T22:15:00Z"
+    }
+  ],
+  "contingencies": { "alternates": [] }
+}
+```
+
+CHORUS plans include an additional `contingencies` object with precomputed alternate targets and late-start ladders. Node agents running older software ignore unknown keys — the plan format is additive and backward-compatible.
+
+## Interrupt System
+
+High-priority alerts (bright novae, rapid transient brightening, ToO requests) can be broadcast to nodes without waiting for the next replan cycle. The admin endpoint `POST /api/v1/interrupts` inserts a row in the `interrupts` table; nodes poll `GET /api/v1/interrupts` on each heartbeat cycle and act on any unexpired entries.
+
+## Manual Operations
+
+<Tip>
+The `scripts/manage.py` admin CLI wraps the same HTTP endpoints. Run `python3 scripts/manage.py ingest` instead of constructing curl commands for day-to-day use.
+</Tip>
+
+Trigger the scoring and planning loops on demand using the admin endpoints:
+
+```bash
+# Trigger alert ingestion + composite rescoring
+curl -X POST \
+  -H "X-Admin-Key: your-admin-key" \
+  http://localhost:8800/api/v1/admin/ingest
+
+# Trigger full rescore + plan regeneration for all nodes
+curl -X POST \
+  -H "X-Admin-Key: your-admin-key" \
+  http://localhost:8800/api/v1/admin/replan
+```
+
+Both endpoints return immediately and run the operation synchronously — the response arrives only when the operation completes. For large fleets, `replan` can take several seconds as CHORUS runs its full T1 → T2 → T3 pipeline.
