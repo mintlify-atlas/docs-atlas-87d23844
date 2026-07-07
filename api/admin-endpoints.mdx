@@ -1,7 +1,7 @@
 ---
-title: "Admin API Endpoints: Scheduling, Codes, and Tuning"
+title: "Admin API Endpoints: Scheduling, Codes, and Operations"
 sidebarTitle: "Admin Endpoints"
-description: "Admin-only REST endpoints protected by X-Admin-Key — trigger ingestion and replanning, generate activation codes in bulk, broadcast interrupts, and manage scoring weight history."
+description: "Admin API: alert ingestion, replanning, bulk activation codes, interrupt broadcasts, scoring weight rollback, sky quality stats, and incidents."
 ---
 
 Admin endpoints give operators direct control over the scheduling pipeline, node onboarding, and science configuration. They are protected by a single shared `X-Admin-Key` header configured in `cloud/config.yaml`. These endpoints are not intended for node agents or member apps — they are designed for cron jobs, deployment scripts, and manual operator intervention. All of them require the admin key to be present and correct on every call; there is no admin session or token.
@@ -147,7 +147,7 @@ Generate one or more activation codes in bulk. Codes are written to the database
 Broadcast a high-priority target interrupt to nodes. The server selects eligible nodes based on their current observability score for the target (requiring a minimum score of 0.35 by default) unless an explicit node list is provided. Nodes poll `GET /api/v1/interrupts` regularly and will see the interrupt on their next poll cycle.
 
 <Note>
-This endpoint uses `X-Admin-Key` authentication rather than node or member credentials. It shares the `/api/v1/interrupts` path with the node's `GET` poll endpoint — the method determines which handler is invoked.
+This endpoint uses `X-Admin-Key` authentication rather than node or member credentials. It shares the `/api/v1/interrupts` path with the node's `GET` poll endpoint — the HTTP method determines which handler is invoked.
 </Note>
 
 <Tabs>
@@ -249,7 +249,7 @@ Retrieve the currently active observability scoring weights and the last 20 entr
     **200 OK**
 
     <ResponseField name="active_weights" type="object">
-      The scoring weights currently applied to every (target, node) score computation. Keys correspond to the six observability factors.
+      The scoring weights currently applied to every (target, node) score computation. Keys correspond to the observability factors.
 
       <Expandable title="Weight fields">
         <ResponseField name="active_weights.light_pollution" type="float">Weight for sky darkness factor.</ResponseField>
@@ -265,7 +265,7 @@ Retrieve the currently active observability scoring weights and the last 20 entr
       Up to 20 most recent weight change records from the `weight_history` audit table, newest first.
 
       <Expandable title="History record fields">
-        <ResponseField name="id" type="integer">History row ID. Use with `POST /api/v1/admin/tuning/rollback` to target a specific weight set.</ResponseField>
+        <ResponseField name="id" type="integer">History row ID.</ResponseField>
         <ResponseField name="changed_at" type="string">ISO 8601 UTC timestamp of the change.</ResponseField>
         <ResponseField name="old_weights" type="object">Weight values before the change.</ResponseField>
         <ResponseField name="new_weights" type="object">Weight values after the change.</ResponseField>
@@ -295,23 +295,9 @@ Retrieve the currently active observability scoring weights and the last 20 entr
         {
           "id": 7,
           "changed_at": "2026-06-15T02:30:00.000000+00:00",
-          "old_weights": {
-            "light_pollution": 0.18,
-            "weather": 0.27,
-            "moon": 0.15,
-            "airmass": 0.15,
-            "window": 0.15,
-            "telescope": 0.10
-          },
-          "new_weights": {
-            "light_pollution": 0.20,
-            "weather": 0.25,
-            "moon": 0.15,
-            "airmass": 0.15,
-            "window": 0.15,
-            "telescope": 0.10
-          },
-          "rationale": "Increased light_pollution weight — recent AAVSO feedback shows submissions from darker sites have better acceptance rates",
+          "old_weights": {"light_pollution": 0.18, "weather": 0.27},
+          "new_weights": {"light_pollution": 0.20, "weather": 0.25},
+          "rationale": "Increased light_pollution weight — darker sites have better AAVSO acceptance rates",
           "model": "chorus_tuner_v2",
           "applied": true
         }
@@ -325,7 +311,7 @@ Retrieve the currently active observability scoring weights and the last 20 entr
 
 ## POST /api/v1/admin/tuning/rollback
 
-Restore the previous scoring weights from the audit log. This is the manual safety valve for cases where an automated tuning run produced unexpected results — for example, over-weighting weather during a period of unusual cloud cover that caused historically dark sites to be under-scheduled.
+Restore the previous scoring weights from the audit log. This is the manual safety valve for cases where an automated tuning run produced unexpected results.
 
 <Tabs>
   <Tab title="Request">
@@ -419,6 +405,29 @@ Retrieve measured sky brightness statistics per node for a rolling time window, 
         }
       ]
     }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## GET /api/v1/admin/patrol
+
+Retrieve recent photometric patrol detections — potential transient events flagged by the data pipeline during flux-differential analysis of photometry submissions.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** `X-Admin-Key`
+
+    No request body or query parameters.
+  </Tab>
+  <Tab title="Response">
+    **200 OK** — Returns recent patrol detection records from the `patrol_detections` table.
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl -H "X-Admin-Key: your-admin-key" \
+         https://api.thetelescope.net/api/v1/admin/patrol
     ```
   </Tab>
 </Tabs>
@@ -527,6 +536,176 @@ Update a structured incident's status, root cause, resolution note, or resolver.
         "resolved_at": "2026-06-15T09:30:00.000000+00:00"
       }
     }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## GET /api/v1/admin/subscribers
+
+List all waitlist subscribers, including their email, referral source, equipment, subscription timestamp, assigned activation code, and current status.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** `X-Admin-Key`
+
+    No request body or query parameters.
+  </Tab>
+  <Tab title="Response">
+    **200 OK** — Returns all subscriber records from the `subscribers` table.
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl -H "X-Admin-Key: your-admin-key" \
+         https://api.thetelescope.net/api/v1/admin/subscribers
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## PATCH /api/v1/admin/subscribers/{sub_id}/status
+
+Update the status of a waitlist subscriber, e.g. to mark them as `"invited"` or `"active"` after sending their welcome email.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** `X-Admin-Key`
+
+    <ParamField path="sub_id" type="integer" required>Subscriber ID from the subscribers list.</ParamField>
+
+    <ParamField body="status" type="string" required>
+      New subscriber status string (e.g. `"pending"`, `"invited"`, `"active"`).
+    </ParamField>
+  </Tab>
+  <Tab title="Response">
+    **200 OK** — Returns the updated subscriber record.
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl -X PATCH \
+         -H "X-Admin-Key: your-admin-key" \
+         -H "Content-Type: application/json" \
+         -d '{"status": "invited"}' \
+         https://api.thetelescope.net/api/v1/admin/subscribers/42/status
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## GET /api/v1/admin/science-program-suggestions
+
+List all member-submitted science program ideas, ordered by submission date descending.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** `X-Admin-Key`
+
+    No request body or query parameters.
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="suggestions" type="array">
+      Array of suggestion records including `id`, `user_id`, `email`, `title`, `description`, `target_examples`, `notes`, `status`, and `created_at`.
+    </ResponseField>
+
+    <ResponseField name="total" type="integer">Total number of suggestions.</ResponseField>
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl -H "X-Admin-Key: your-admin-key" \
+         https://api.thetelescope.net/api/v1/admin/science-program-suggestions
+    ```
+
+    ```json
+    {
+      "suggestions": [
+        {
+          "id": 12,
+          "user_id": "u_4a8b1c2d",
+          "email": "jane@example.com",
+          "title": "Symbiotic Star Monitoring Campaign",
+          "status": "pending",
+          "created_at": "2026-06-15T14:00:00.000000+00:00"
+        }
+      ],
+      "total": 1
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## PATCH /api/v1/admin/science-program-suggestions/{suggestion_id}/status
+
+Update the review status of a member-submitted science program suggestion.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** `X-Admin-Key`
+
+    <ParamField path="suggestion_id" type="integer" required>Suggestion ID from the suggestions list.</ParamField>
+
+    <ParamField body="status" type="string" required>
+      New status. Must be one of: `"pending"`, `"reviewed"`, `"accepted"`, or `"declined"`.
+    </ParamField>
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="ok" type="boolean">`true` when updated.</ResponseField>
+
+    **400** is returned when the status value is not one of the permitted values.
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl -X PATCH \
+         -H "X-Admin-Key: your-admin-key" \
+         -H "Content-Type: application/json" \
+         -d '{"status": "accepted"}' \
+         https://api.thetelescope.net/api/v1/admin/science-program-suggestions/12/status
+    ```
+
+    ```json
+    {"ok": true}
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## PATCH /api/v1/site/config
+
+Update public site configuration. Currently supports updating the displayed member count on the tour page.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** `X-Admin-Key`
+
+    <ParamField body="member_count" type="integer">
+      New value for the publicly displayed member count.
+    </ParamField>
+  </Tab>
+  <Tab title="Response">
+    **200 OK** — Returns the full updated site config object (same shape as `GET /api/v1/site/config`).
+
+    <ResponseField name="member_count" type="integer">The updated member count.</ResponseField>
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl -X PATCH \
+         -H "X-Admin-Key: your-admin-key" \
+         -H "Content-Type: application/json" \
+         -d '{"member_count": 50}' \
+         https://api.thetelescope.net/api/v1/site/config
+    ```
+
+    ```json
+    {"member_count": 50}
     ```
   </Tab>
 </Tabs>

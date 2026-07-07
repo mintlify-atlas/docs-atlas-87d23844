@@ -1,7 +1,7 @@
 ---
 title: "Claude Weight Tuning Monitor for Observability Scoring"
 sidebarTitle: "Weight Tuning"
-description: "Configure and monitor the optional Claude-powered weight tuning system that nightly adapts observability scoring weights based on observation outcomes — with full audit trail and rollback."
+description: "Enable the nightly Claude weight monitor, configure its parameters, inspect live weights via the admin API, and roll back any change in one API call."
 ---
 
 The Telescope Net's scheduling engine assigns observations to telescopes using a composite score that blends six observability sub-weights. By default these weights are static — they stay at the values set in `cloud/config.yaml` forever. When you opt in to the weight tuning monitor, a nightly advisory process reads the last N nights of real observation outcomes, identifies which weights appear misaligned with actual results, and proposes small evidence-justified adjustments. The hot path — alert ingestion, scoring, and plan generation — stays 100% procedural code with no LLM calls and no added latency. Claude is used only in this advisory monitor, and only once per night.
@@ -59,9 +59,9 @@ The nightly monitor runs in three procedural steps after the daily maintenance w
   <Step title="Apply with safeguards">
     All application logic is procedural — Claude's proposed values are never applied raw:
 
-    1. Each weight is clamped to a maximum change of ±`max_delta_per_night` (default 5%) from its current value
+    1. Each weight is clamped to a maximum change of ±`max_delta` (default 5%) from its current value
     2. The full weight set is renormalized to sum exactly 1.0
-    3. If no weight moved more than `min_weight_change` (default 0.5%), the change is considered immaterial and discarded silently
+    3. If no weight moved more than `min_change` (default 0.5%), the change is considered immaterial and discarded silently
     4. Otherwise the new weights are persisted to the `tuning_state` table with a full audit row in `weight_history` including the old values, new values, rationale, and Claude model used
     5. Admin users receive an in-app notification summarising the change
   </Step>
@@ -79,22 +79,22 @@ Enable and configure the tuning monitor in `cloud/config.yaml`:
 tuning:
   enabled: false                # set true to enable Claude-powered tuning
   model: claude-opus-4-8        # Claude model for advisory proposals
-  lookback_days: 14             # analyze the last N nights of observations
-  max_delta_per_night: 0.05     # hard cap: no weight moves more than ±5% per night
-  min_nights_for_tuning: 7      # require ≥ 7 nights of historical data before first run
+  lookback_nights: 14           # analyze the last N nights of observations
+  max_delta: 0.05               # hard cap: no weight moves more than ±5% per night
+  min_nights_data: 7            # require ≥ 7 nights of historical data before first run
   min_measurements: 30          # require ≥ 30 measurements before first run
-  min_weight_change: 0.005      # skip apply/notify if no weight moves > 0.5%
+  min_change: 0.005             # skip apply/notify if no weight moves > 0.5%
 ```
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `enabled` | `false` | Master on/off switch. Ships disabled; behavior is identical to static weights when `false`. |
 | `model` | `claude-opus-4-8` | Claude model used for advisory proposals. Set `claude-sonnet-4-6` to reduce API cost. |
-| `lookback_days` | `14` | Number of past nights whose outcomes are analysed in each run. Larger values mean more stable evidence but slower adaptation. |
-| `max_delta_per_night` | `0.05` | Trust-region cap: no single weight can change by more than this fraction (0.05 = 5%) in one night, regardless of what Claude proposes. |
-| `min_nights_for_tuning` | `7` | Tuning is skipped if fewer than this many nights of data exist. Prevents premature adjustments during beta rollout. |
+| `lookback_nights` | `14` | Number of past nights whose outcomes are analysed in each run. Larger values mean more stable evidence but slower adaptation. |
+| `max_delta` | `0.05` | Trust-region cap: no single weight can change by more than this fraction (0.05 = 5%) in one night, regardless of what Claude proposes. |
+| `min_nights_data` | `7` | Tuning is skipped if fewer than this many nights of data exist. Prevents premature adjustments during beta rollout. |
 | `min_measurements` | `30` | Tuning is skipped if fewer than this many measurements exist in the lookback window. |
-| `min_weight_change` | `0.005` | If the maximum change across all weights after clamping is smaller than this, the run is treated as a no-op — no DB write, no notification. |
+| `min_change` | `0.005` | If the maximum change across all weights after clamping is smaller than this, the run is treated as a no-op — no DB write, no notification. |
 
 ### Required Environment Variable
 
@@ -109,7 +109,7 @@ Tuning runs as part of the daily maintenance window, typically 2–3 AM UTC. Set
 </Warning>
 
 <Note>
-Both `min_measurements` (default 30) and `min_nights_for_tuning` (default 7) must be satisfied before the monitor makes its first weight change. On a fresh installation with no observation history, expect at least one to two weeks before tuning activates.
+Both `min_measurements` (default 30) and `min_nights_data` (default 7) must be satisfied before the monitor makes its first weight change. On a fresh installation with no observation history, expect at least one to two weeks before tuning activates.
 </Note>
 
 ---
@@ -203,7 +203,7 @@ In Ring 1, any proposed change to CHORUS hyperparameters (e.g. `scarcity_gamma`,
   2. **Enabled in config?** Confirm `tuning.enabled: true` in `cloud/config.yaml`.
   3. **Timing:** Tuning is a daily task that runs during the maintenance window (typically 2–3 AM UTC). It will not run on demand — check again after the next window.
   4. **Check logs:** The `cloud.tuning` logger emits detailed output. Search for `"Tuning skipped"` or `"Nightly tuning failed"` to identify the specific failure.
-  5. **Insufficient data:** Tuning requires at least `min_measurements` (default 30) and `min_nights_for_tuning` (default 7) measurements in the lookback window. New installations will not tune until this threshold is met.
+  5. **Insufficient data:** Tuning requires at least `min_measurements` (default 30) and `min_nights_data` (default 7) measurements in the lookback window. New installations will not tune until this threshold is met.
 </Accordion>
 
 <Accordion title="Weight changes have no effect on the observation plan">
@@ -230,7 +230,7 @@ In Ring 1, any proposed change to CHORUS hyperparameters (e.g. `scarcity_gamma`,
 <Accordion title="Claude API errors during tuning">
   | Error | Cause | Resolution |
   |-------|-------|-----------|
-  | `429 Too Many Requests` | Rate limit hit on Anthropic API | Reduce frequency by increasing `lookback_days`, or temporarily disable tuning |
+  | `429 Too Many Requests` | Rate limit hit on Anthropic API | Reduce frequency by increasing `lookback_nights`, or temporarily disable tuning |
   | `401 Unauthorized` | Invalid or expired API key | Verify `ANTHROPIC_API_KEY` is correct and the account has remaining quota |
   | Content policy violation | Evidence brief triggers a content refusal (rare) | Tuning skips the apply step and logs a warning; weights remain unchanged |
 

@@ -1,10 +1,10 @@
 ---
 title: "Public API Endpoints: Network Status and Photometry Data"
 sidebarTitle: "Public Endpoints"
-description: "No-auth REST endpoints for public consumers — active target queue, historical light curves, live network status, weather forecasts, and light pollution data."
+description: "Public API: active targets, light curves, network status, activity feed, weather, sky brightness, object catalogue, telescope catalog, and email subscribe."
 ---
 
-Public endpoints require no authentication and are intended for use by the marketing site, community dashboards, third-party integrations, and anyone curious about The Telescope Net's live science output. They cover the active observing target queue with composite scores, historical photometry for any named variable star, real-time network health, astronomy weather forecasts, and sky brightness data. All responses are JSON and include permissive CORS headers so browser clients can call them directly.
+Public endpoints require no authentication and are intended for use by the marketing site, community dashboards, third-party integrations, and anyone curious about The Telescope Net's live science output. They cover the active observing target queue with composite scores, historical photometry for any named variable star, real-time network health, astronomy weather forecasts, sky brightness data, public object catalogue lookups, and the email subscribe flow. All responses are JSON and include permissive CORS headers so browser clients can call them directly.
 
 ---
 
@@ -237,6 +237,66 @@ Retrieve a live snapshot of the network's node count, observation totals, and no
 
 ---
 
+## GET /api/v1/network/activity
+
+Retrieve a public activity feed of recent observations, AAVSO submissions, new node registrations, and transient interrupts. Useful for live dashboards and community feeds.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** None
+
+    <ParamField query="limit" type="integer">
+      Maximum number of events to return. Default `50`, maximum `200`.
+    </ParamField>
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="events" type="array">
+      Array of activity events sorted by time descending, covering up to the last 14 days.
+
+      <Expandable title="Event fields">
+        <ResponseField name="type" type="string">Event type: `"measurement"`, `"aavso_submission"`, `"node_joined"`, or `"transient_interrupt"`.</ResponseField>
+        <ResponseField name="at" type="string">ISO 8601 UTC timestamp of the event.</ResponseField>
+        <ResponseField name="node_id" type="string">Node ID for observation and registration events.</ResponseField>
+        <ResponseField name="target" type="string">Target name for observation and interrupt events.</ResponseField>
+        <ResponseField name="summary" type="string">Human-readable one-line description of the event.</ResponseField>
+        <ResponseField name="expires_at" type="string">Expiry timestamp for `transient_interrupt` events.</ResponseField>
+      </Expandable>
+    </ResponseField>
+
+    <ResponseField name="server_time" type="string">ISO 8601 UTC timestamp of this response.</ResponseField>
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl "https://api.thetelescope.net/api/v1/network/activity?limit=10"
+    ```
+
+    ```json
+    {
+      "events": [
+        {
+          "type": "aavso_submission",
+          "at": "2026-06-15T03:10:00.000000+00:00",
+          "node_id": "node_a3f9b2c1",
+          "target": "SS_Cyg",
+          "summary": "SS_Cyg 11.420±0.018 CV"
+        },
+        {
+          "type": "node_joined",
+          "at": "2026-06-14T18:00:00.000000+00:00",
+          "node_id": "node_d4c1a2b3",
+          "summary": "New node joined in Austin, US."
+        }
+      ],
+      "server_time": "2026-06-15T03:15:00.000000+00:00"
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
 ## GET /api/v1/health
 
 Verify that the API server and its database connection are healthy. Use this endpoint in uptime monitors and deployment health checks.
@@ -343,7 +403,7 @@ Retrieve an astronomy-optimised weather forecast for any coordinates. Data is so
 
 ## GET /api/v1/light-pollution
 
-Retrieve sky brightness data for any coordinates. Returns the magnitude-per-square-arcsecond (mpsas) reading and Bortle scale classification. The server caches results per location for 7 days to avoid upstream rate limits.
+Retrieve sky brightness data for any coordinates. Returns the magnitude-per-square-arcsecond (mpsas) reading and Bortle scale classification. The server caches results per location to avoid upstream rate limits.
 
 <Tabs>
   <Tab title="Request">
@@ -381,6 +441,38 @@ Retrieve sky brightness data for any coordinates. Returns the magnitude-per-squa
       "source": "light_pollution_map",
       "radiance_nw_cm2_sr": 1.42
     }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## GET /api/v1/sky-quality
+
+Retrieve sky brightness (mpsas and Bortle scale) for any coordinates. This is a lightweight alternative to `/api/v1/light-pollution` used by the Start Tonight sheet and mobile app location picker.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** None
+
+    <ParamField query="lat" type="float" required>Latitude in decimal degrees.</ParamField>
+    <ParamField query="lon" type="float" required>Longitude in decimal degrees.</ParamField>
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="mpsas" type="float">Sky brightness in magnitudes per square arcsecond.</ResponseField>
+    <ResponseField name="bortle" type="integer">Bortle scale classification (1–9).</ResponseField>
+
+    **400** is returned when `lat` or `lon` are missing or non-numeric.
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl "https://api.thetelescope.net/api/v1/sky-quality?lat=41.6611&lon=-77.8202"
+    ```
+
+    ```json
+    {"mpsas": 21.8, "bortle": 2}
     ```
   </Tab>
 </Tabs>
@@ -428,6 +520,123 @@ Retrieve public catalogue details for any astronomical object by name. The serve
       "aliases": ["CSS_J214143.5+433512", "AAVSO 2138+43"],
       "public_sources": ["CDS Sesame"],
       "errors": []
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## GET /api/v1/telescopes
+
+Retrieve the public telescope spec catalog used by the app's model picker. Each entry includes physical specifications and the derived parameters (pixel scale, FOV, magnitude limits) computed from the hardware specs.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** None
+
+    No query parameters.
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="telescopes" type="array">
+      Array of telescope catalog entries, each with model name, specs, and derived parameters.
+    </ResponseField>
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl https://api.thetelescope.net/api/v1/telescopes
+    ```
+
+    ```json
+    {
+      "telescopes": [
+        {
+          "model": "ZWO Seestar S50",
+          "aperture_mm": 50,
+          "focal_length_mm": 250,
+          "fov_deg": 1.27,
+          "pixel_scale_arcsec": 2.4,
+          "mag_faint_limit": 15.5
+        }
+      ]
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## GET /api/v1/site/config
+
+Retrieve public site configuration, currently the displayed member count shown on the tour page.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** None
+
+    No query parameters.
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="member_count" type="integer">The publicly displayed member count.</ResponseField>
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl https://api.thetelescope.net/api/v1/site/config
+    ```
+
+    ```json
+    {"member_count": 42}
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## POST /api/v1/subscribe
+
+Subscribe an email address to The Telescope Net waitlist. If the email is new, an activation code is generated and stored. Returns the same code idempotently for existing subscribers.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** None
+
+    <ParamField body="email" type="string" required>
+      Valid email address to subscribe.
+    </ParamField>
+
+    <ParamField body="source" type="string">
+      Referral source identifier, e.g. `"tour"` (default) or `"social"`. Maximum 64 characters.
+    </ParamField>
+
+    <ParamField body="equipment" type="string">
+      Equipment description, e.g. `"ZWO Seestar S50"`. Maximum 64 characters.
+    </ParamField>
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="ok" type="boolean">`true` when the subscription is recorded.</ResponseField>
+    <ResponseField name="code" type="string">Activation code in `BS-YYYY-XXXXXXXX` format assigned to this subscriber.</ResponseField>
+    <ResponseField name="new" type="boolean">`true` when this is a new subscription; `false` when the email was already subscribed.</ResponseField>
+
+    **400** is returned when the email is missing or invalid.
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl -X POST https://api.thetelescope.net/api/v1/subscribe \
+         -H "Content-Type: application/json" \
+         -d '{"email": "jane@example.com", "equipment": "ZWO Seestar S50"}'
+    ```
+
+    ```json
+    {
+      "ok": true,
+      "code": "BS-2026-WXYZ9876",
+      "new": true
     }
     ```
   </Tab>

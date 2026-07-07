@@ -47,11 +47,11 @@ The signed-in shell (`home_screen.dart`) is a tab bar containing five primary de
 | **Telescopes (Nodes)** | List of the member's registered telescope nodes. Shows online/offline status, model, location, and last heartbeat age. The + button opens a claim-a-node sheet where members enter their node ID and API key or use a Node Activation Code. Members can name and rename their telescopes. |
 | **History (Observations)** | Photometric measurement history for the last 365 days, with a night-strip at the top for per-night summaries. Drill into any measurement to open the target detail screen showing the light curve. |
 | **Me** | Member profile, cumulative stats (total observations, AAVSO accepted, targets covered), and per-member achievements. Accessible from the sidebar on web. |
-| **More** | Science program suggestions (members can propose new targets/programs via `suggest_program_screen.dart`), settings, and about. |
+| **More** | Entry points for the Help screen (contact links, AI assistant, node diagnostics) and science program suggestions (`suggest_program_screen.dart`). |
 
 A **Notifications** sheet is accessible from the alert badge in the app bar and shows alerts, night summaries, and system messages. Individual items can be marked read by tapping.
 
-A **Help** tab (reachable from the More menu and the app bar) surfaces contact links, the AI chat assistant, live node diagnostics, and config patch requests.
+A **Help** screen (reachable by tapping "Help" inside the More tab) surfaces contact links, the AI chat assistant, live node diagnostics, and config patch requests.
 
 ## AI Help Assistant
 
@@ -121,7 +121,7 @@ The app was built accessibility-first, not retrofitted. Every feature below is a
     - **Audio descriptions** of all data (three depth levels) via `flutter_tts`
     - **Light curve sonification** — hear how a star's brightness changed over a night
     - **Haptic light curves** — feel the brightness pattern through vibration via the `vibration` package
-    - **Spatial audio sky map** — hold the phone up and hear which objects are overhead, powered by `sensors_plus`
+    - **Spatial audio sky map** — hold the phone up and hear which objects are overhead (uses the device accelerometer)
     - **Proxy observation support** — caregivers can configure nodes; the member receives all results
   </Tab>
 </Tabs>
@@ -135,10 +135,9 @@ The following packages from `pubspec.yaml` provide the core capabilities describ
 | `fl_chart ^0.70.0` | Photometric light curves and stat charts |
 | `flutter_tts ^4.0.0` | Audio descriptions of data, sonification |
 | `vibration ^2.0.0` | Haptic light curves and alert patterns |
-| `sensors_plus` | Accelerometer for the spatial audio sky map |
+| `geolocator ^13.0.0` | Location permission + coordinates for node registration |
 | `firebase_core ^3.0.0` + `firebase_messaging ^15.0.0` | Push notifications |
 | `http ^1.2.0` | Cloud API client (`api_client.dart`) |
 | `provider ^6.1.2` | App-wide state management (`app_state.dart`) |
 | `shared_preferences ^2.2.3` | Bearer token persistence (`auth_store.dart`) |
 | `url_launcher ^6.3.0` | External links from the Help contact card |
-| `geolocator ^13.0.0` | Location for node registration |

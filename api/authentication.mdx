@@ -1,7 +1,7 @@
 ---
-title: "Authenticate Requests to the Cloud API"
+title: "API Authentication: Node Keys, Bearer Tokens, Admin Key"
 sidebarTitle: "Authentication"
-description: "Three authentication schemes for The Telescope Net API — node credentials (X-Node-Id + X-Api-Key), member bearer tokens, and admin key — with examples for each caller type."
+description: "Three auth schemes for The Telescope Net API: node X-Node-Id/X-Api-Key pairs, member Authorization Bearer tokens, and the X-Admin-Key shared secret."
 ---
 
 The Telescope Net API uses three distinct authentication schemes depending on who is making the request. Node agents use a long-lived API key pair obtained at first-boot registration. Members and app users authenticate with rotating bearer tokens issued at login. Administrators use a single shared key configured server-side. None of these schemes use OAuth or session cookies — all credentials are passed as HTTP headers on every request.

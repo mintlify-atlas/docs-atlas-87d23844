@@ -1,7 +1,7 @@
 ---
-title: "Nightly Scheduler: How Plans Are Generated"
+title: "Nightly Scheduler: Alert Ingestion to Observation Plans"
 sidebarTitle: "Scheduler"
-description: "Understand how the Telescope Net scheduler ingests alerts, scores targets per node, and generates nightly observation plans — including the composite scoring formula and reliability multiplier."
+description: "How the Telescope Net scheduler scores target–node pairs, applies the reliability multiplier, and produces nightly plans from six alert broker feeds."
 ---
 
 Every night, the Telescope Net cloud server answers the same question for each connected Seestar: which targets should it observe, in what order, and for how long? The answer emerges from a three-stage pipeline — alert ingestion builds the pool of candidates, composite scoring ranks every (target, node) pairing, and the plan generator turns those scores into sequenced observation lists. CHORUS, the default live scheduler, replaces the final stage with an information-theoretic assignment algorithm described on the [CHORUS](/cloud/chorus) page. This page covers the underlying scoring machinery that feeds into both.
@@ -77,7 +77,7 @@ observability_weights:
 |--------|-------------|
 | `light_pollution` | Sky background suitability: bright targets tolerate light pollution; faint ones need dark skies (mpsas 22 = pristine → 1.0; mpsas 17 = inner city → 0.0) |
 | `weather` | Night-mean composite of cloud cover (1 − cloud fraction), atmospheric seeing, and transparency — from 7timer ASTRO data where available, falling back to Open-Meteo cloud cover |
-| `moon` | Lunar interference: scales with illumination × angular proximity at midnight; < 10° separation scores 0.05 regardless |
+| `moon` | Lunar interference: scales with illumination × angular proximity at midnight; &lt; 10° separation scores 0.05 regardless |
 | `airmass` | Best achievable airmass over the night: X = 1 → 1.0, X = 3 → 0.0 (linear) |
 | `window` | Fraction of the dark window the target is above `min_altitude_deg`; ≥ 4 hours visible saturates at 1.0 |
 | `telescope` | Hardware match: aperture-limited magnitude headroom and field-of-view suitability to the target class |
@@ -145,7 +145,7 @@ The scheduler reads the following columns from the `nodes` table when building s
   <Tab title="Performance">
     | Column | Formula | Scheduler role |
     |--------|---------|---------------|
-    | `total_observations` | COUNT(*) in measurements | Activity level — nodes with < 10 stay at neutral 0.50 |
+    | `total_observations` | COUNT(*) in measurements | Activity level — nodes with &lt; 10 stay at neutral 0.50 |
     | `aavso_accepted` | Submitted and non-outlier | Ultimate science output metric |
     | `aavso_rejected` | Outlier count | Cross-validation disagreement |
     | `mean_uncertainty` | AVG(uncertainty) for non-poor | Typical photometric precision |

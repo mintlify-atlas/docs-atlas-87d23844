@@ -1,7 +1,7 @@
 ---
-title: "Submit Photometry to AAVSO WebObs Step by Step"
+title: "Submit Telescope Network Photometry to AAVSO WebObs"
 sidebarTitle: "AAVSO Submissions"
-description: "Configure AAVSO credentials, preview submission batches with the admin CLI, and submit calibrated photometry to AAVSO WebObs — including dry-run testing and error diagnosis."
+description: "Configure credentials, preview AAVSO Extended File Format batches via the admin CLI, submit photometry live, and review the per-submission audit trail."
 ---
 
 The Telescope Net cloud server accumulates calibrated photometry measurements from every active node, batches them under the network's AAVSO observer code, and POSTs the resulting Extended File Format document to the AAVSO WebObs API. No manual formatting or uploading is required — once your credentials are configured, the pipeline handles everything from quality filtering through audit-trail archiving. This page walks you through configuring those credentials, verifying the output format, and submitting your first live batch.
@@ -139,7 +139,7 @@ python3 scripts/manage.py --config /etc/telescopenet/config.yaml status
 
 Each submission is a plain-text document following the [AAVSO Extended File Format](https://www.aavso.org/aavso-extended-file-format) spec. The pipeline generates one document per batch run and saves it before any POST attempt.
 
-```
+```text
 #TYPE=Extended
 #OBSCODE=[network observer code]
 #SOFTWARE=The Telescope Net Node v1
@@ -200,7 +200,7 @@ Measurements flagged `poor` are skipped by default. To include them, set `aavso.
 
 Every submission — whether dry run, live POST, or rejected — generates a full audit trail under the `aavso.audit_dir` directory (default: `cloud_data/aavso_batches/`):
 
-```
+```text
 cloud_data/aavso_batches/
 └── YYYY-MM-DD/
     ├── <target>_<bjd>.txt            # formatted Extended File Format document

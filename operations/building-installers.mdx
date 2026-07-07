@@ -1,7 +1,7 @@
 ---
 title: "Build Node Agent Installers for Windows, macOS, and Linux"
 sidebarTitle: "Building Installers"
-description: "Use PyInstaller and the build system to produce one-click Node Agent installers for Windows (NSIS), macOS (.pkg), and Linux (systemd) — including service registration and sleep prevention."
+description: "Use build.py to produce Node Agent installers: PyInstaller bundles ASTAP, the OS service is registered at install time, and sleep prevention is applied."
 ---
 
 The Node Agent build system uses PyInstaller to bundle `src/main_service.py` and all dependencies into a single self-contained executable, then wraps it in a platform-native installer that registers the agent as a system service, writes the initial `config.yaml` from a template, and configures the OS to prevent sleep during overnight operation. Donors receive one file to download and one prompt to answer — their activation code — and the telescope is online.
@@ -35,6 +35,9 @@ python3 build/build.py --bundle-only
 # Remove dist/ and build cache before building
 python3 build/build.py --clean
 
+# Embed a version string in the build (e.g. 1.2.0)
+python3 build/build.py --version 1.2.0
+
 # Download the ASTAP binary for the current platform, then exit
 python3 build/build.py --download-astap
 
@@ -47,7 +50,7 @@ python3 build/build.py --skip-astap
 | Platform | Output |
 |----------|--------|
 | Windows | `dist/TelescopeNetNode-Setup.exe` |
-| macOS | `dist/BoundlessSkiesNode-X.Y.Z-macOS.pkg` |
+| macOS | `dist/TelescopeNetNode-X.Y.Z-macOS.pkg` |
 | Linux | `dist/BoundlessSkiesNode-linux-x86_64` |
 
 <Warning>
@@ -75,7 +78,7 @@ The Windows installer is built from `build/windows/install.nsi` using NSIS. It p
   </Step>
   <Step title="Disable AC idle sleep">
     The installer calls:
-    ```
+    ```bat
     powercfg /change standby-timeout-ac 0
     powercfg /change hibernate-timeout-ac 0
     powercfg /change disk-timeout-ac 0
@@ -176,7 +179,7 @@ If sleep prevention is not working, an overnight session can be silently interru
 |------|---------|
 | `build/build.py` | Cross-platform build orchestration script (run this) |
 | `build/node_agent.spec` | PyInstaller spec — controls what is bundled into the executable |
-| `build/config.template.yaml` | Config template written by installers; contains `ACTIVATION_CODE_PLACEHOLDER` |
+| `build/config.template.yaml` | Config template written by installers; the `cloud.activation_code` field is populated from the installer prompt |
 | `build/windows/install.nsi` | NSIS installer script for Windows |
 | `build/macos/build_dmg.sh` | macOS `.pkg` build script |
 | `build/linux/install.sh` | systemd install script for Linux |

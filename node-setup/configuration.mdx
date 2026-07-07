@@ -1,7 +1,7 @@
 ---
-title: "Configure the Node Agent with config.yaml"
+title: "Node Agent config.yaml: Complete Configuration Reference"
 sidebarTitle: "Configuration"
-description: "Complete reference for every config.yaml section — cloud connection, photometry, AAVSO credentials, observatory location, safety, and image watcher settings."
+description: "Node Agent config.yaml reference: cloud, observatory, photometry, AAVSO, safety, ALPACA, devices, logging, and all hardware section defaults explained."
 ---
 
 Every aspect of the Node Agent's behaviour is controlled by a single file: `config.yaml` in the project root. The file is read at startup and re-read on demand — the in-browser config editor in the dashboard writes changes directly to this file and they take effect without a restart. This page documents every section and every parameter.
@@ -108,8 +108,10 @@ photometry:
   filter_name: CV
   gain: 1
   read_noise: 5
+  solver: astap           # astap | astrometry
   astap_path: astap
   astap_search_radius: 10
+  solve_field_path: solve-field  # used when solver: astrometry
   force_plate_solve: true
   bjd_midpoint_correction: true
   aperture_factor: 1.5
@@ -159,9 +161,11 @@ photometry:
 |-----------|------|---------|-------------|
 | `astap_path` | string | `'astap'` | Path to the ASTAP binary. If ASTAP is not on your system `PATH`, set this to the full path, e.g. `/usr/local/bin/astap`. |
 | `astap_search_radius` | int | `10` | ASTAP search radius in degrees. Increase if your Seestar's pointing is far off (useful for initial sessions). |
-| `force_plate_solve` | bool | `true` | Always run ASTAP even if the FITS header already contains WCS keywords. |
+| `solver` | string | `'astap'` | Plate-solver backend. `'astap'` uses the bundled ASTAP binary; `'astrometry'` uses Astrometry.net's `solve-field` CLI. |
+| `solve_field_path` | string | `'solve-field'` | Path to the `solve-field` binary when `solver: astrometry` is selected. Ignored when using ASTAP. |
+| `force_plate_solve` | bool | `true` | Always run the plate solver even if the FITS header already contains WCS keywords. |
 | `bjd_midpoint_correction` | bool | `true` | Compute BJD at mid-exposure (`DATE-OBS + EXPTIME/2`). Set `false` for devices where `DATE-OBS` is already the mid- or end-point. |
-| `pixel_scale` | float | `2.4` | Pixel scale in arcseconds/pixel. Used by ASTAP and for aperture size calculations. |
+| `pixel_scale` | float | `2.4` | Pixel scale in arcseconds/pixel. Used by the plate solver and for aperture size calculations. |
 
 ### Aperture photometry
 
@@ -332,6 +336,179 @@ devices:
 | `focuser.enabled` | bool | `false` | Connect the ALPACA focuser device. Required for autofocus. |
 | `filterwheel.enabled` | bool | `false` | Connect the ALPACA filter wheel device. Required for multi-band BVRI photometry. |
 | `covercalibrator.enabled` | bool | `true` | Connect the ALPACA cover calibrator (arm control on Seestar). Set `false` to suppress the `400 Client Error: CoverCalibrator` warning if no device is configured at index 0. |
+
+---
+
+## `alpaca` — ALPACA Protocol Settings
+
+The `alpaca` section controls how the Node Agent communicates with ALPACA-compatible devices on the local network, including Seestar discovery and the default server address.
+
+```yaml
+alpaca:
+  api_version: 1
+  default_server:
+    address: 172.22.6.32
+    port: 32323
+  discovery_port: 32227
+  discovery_timeout: 5
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `api_version` | int | `1` | ALPACA API version to use. The current ASCOM ALPACA spec is version 1. |
+| `default_server.address` | string | `''` | IP address of the ALPACA device to connect to automatically. Set by the dashboard when you click "Set as default". |
+| `default_server.port` | int | `11111` | Port of the default ALPACA server. Seestar typically uses `32323` when in Station Mode. |
+| `discovery_port` | int | `32227` | UDP port used for ALPACA discovery broadcasts. The ASCOM standard port is `32227`; change only if your device uses a different port. |
+| `discovery_timeout` | int | `5` | Seconds to wait for ALPACA discovery responses before giving up. Increase on slow or congested networks. |
+
+---
+
+## `autofocus` — Autofocus Sweep Defaults
+
+Default parameters for the V-curve autofocus sweep. These are used when autofocus is triggered from the dashboard without explicit overrides.
+
+```yaml
+autofocus:
+  exposure_s: 2
+  steps_per_side: 5
+  step_size: 50
+  settle_s: 1
+  samples_per_point: 1
+  min_position: null
+  max_position: null
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `exposure_s` | float | `2` | Exposure duration in seconds for each autofocus test frame. |
+| `steps_per_side` | int | `5` | Number of focuser positions to sample on each side of centre. Total positions = `2 × steps_per_side + 1`. |
+| `step_size` | int | `50` | Focuser step size (encoder counts) between test positions. |
+| `settle_s` | float | `1` | Seconds to wait after each focuser move before exposing. |
+| `samples_per_point` | int | `1` | Number of frames averaged at each focuser position. Increase to reduce noise on poor seeing nights. |
+| `min_position` | int | `null` | Focuser lower bound for the sweep. `null` uses the device's physical minimum. |
+| `max_position` | int | `null` | Focuser upper bound for the sweep. `null` uses the device's physical maximum. |
+
+---
+
+## `camera` — Manual Exposure Defaults
+
+Default camera settings used when triggering a manual exposure from the dashboard.
+
+```yaml
+camera:
+  binning: 1
+  exposure_duration: 30
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `binning` | int | `1` | Default binning factor for manual exposures (1 = no binning). |
+| `exposure_duration` | float | `30` | Default exposure duration in seconds for manual single exposures. |
+
+---
+
+## `centering` — Auto-Centering (Plate-Solve GoTo)
+
+Settings for the closed-loop centering routine that plate-solves a short exposure and iteratively corrects the slew until the target is within tolerance.
+
+```yaml
+centering:
+  exposure_s: 3
+  tolerance_arcmin: 3
+  max_iterations: 4
+  settle_s: 2
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `exposure_s` | float | `3` | Exposure duration in seconds for each centering solve frame. |
+| `tolerance_arcmin` | float | `3` | Acceptable pointing error in arcminutes. Centering stops when the plate-solve reports a residual below this threshold. |
+| `max_iterations` | int | `4` | Maximum correction cycles before the routine gives up. |
+| `settle_s` | float | `2` | Seconds to wait after each corrective slew before taking the next centering frame. |
+
+---
+
+## `logging` — Log Format and Level
+
+Controls the verbosity and format of the Node Agent's log output.
+
+```yaml
+logging:
+  level: INFO
+  format: '%(asctime)s [%(levelname)s] %(name)s: %(message)s'
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `level` | string | `'INFO'` | Python logging level. Options: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`. Use `DEBUG` when troubleshooting to see ALPACA HTTP traffic and detailed pipeline steps. |
+| `format` | string | `'%(asctime)s [%(levelname)s] %(name)s: %(message)s'` | Python `logging` format string for log lines written to file and the dashboard log stream. |
+
+---
+
+## `pier_cam` — Pier Camera (ZWO ASI Live Preview)
+
+Optional ZWO ASI camera attached to the pier for a real-time sky or dome view. Requires the `zwoasi` Python package and the ZWO ASI SDK library.
+
+```yaml
+pier_cam:
+  enabled: false
+  device_index: 0
+  exposure_ms: 80
+  gain: 200
+  bin: 2
+  target_fps: 10
+  jpeg_quality: 75
+  sdk_lib: ''
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `enabled` | bool | `false` | Set `true` to start the pier camera live stream on Node Agent startup. |
+| `device_index` | int | `0` | ZWO ASI device index (0 = first connected ASI camera). |
+| `exposure_ms` | float | `80` | Exposure duration in milliseconds for each pier cam frame. |
+| `gain` | int | `200` | Camera gain. Adjust for your ambient light level. |
+| `bin` | int | `2` | Binning factor applied to the sensor (2 = 2×2 binning). Reduces resolution but improves frame rate and SNR. |
+| `target_fps` | float | `10` | Target frame rate for the MJPEG live stream. Actual rate is limited by `exposure_ms`. |
+| `jpeg_quality` | int | `75` | JPEG compression quality (1–95). Lower values reduce bandwidth; higher values improve image clarity. |
+| `sdk_lib` | string | `''` | Path to the ZWO ASI SDK shared library (e.g. `libASICamera2.so`). Leave blank if the library is on the system `LD_LIBRARY_PATH`. |
+
+---
+
+## `stacking` — Live Sub-Frame Stacking Defaults
+
+Default parameters for the live stacking session launched from the dashboard. Stacking co-adds sub-frames in real time using RANSAC sub-pixel alignment.
+
+```yaml
+stacking:
+  frames: 20
+  exposure_s: 10
+  preview_every: 1
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `frames` | int | `20` | Number of sub-frames to stack in a live stacking session. |
+| `exposure_s` | float | `10` | Exposure duration in seconds for each sub-frame. |
+| `preview_every` | int | `1` | Refresh the stacked preview image after every N frames. `1` updates on every frame; increase to reduce dashboard load on slow connections. |
+
+---
+
+## `telescope` — Telescope Slew Defaults
+
+Default RA/Dec target and tracking rate used by the manual slew controls in the dashboard.
+
+```yaml
+telescope:
+  slew_ra: 23.6833
+  slew_dec: 80.2692
+  tracking_rate: 0
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `slew_ra` | float | `23.6833` | Default target RA in decimal hours, pre-populated in the dashboard slew form. |
+| `slew_dec` | float | `80.2692` | Default target Dec in decimal degrees, pre-populated in the dashboard slew form. |
+| `tracking_rate` | int | `0` | Sidereal tracking rate index. `0` = sidereal. Not currently used for Seestar ALPACA (tracking is managed by the Seestar firmware). |
 
 ---
 

@@ -1,7 +1,7 @@
 ---
 title: "Install the Node Agent on Windows, macOS, and Linux"
 sidebarTitle: "Installation"
-description: "Detailed installation instructions for the Telescope Net Node Agent on all supported platforms, including installer options, service registration, and sleep prevention configuration."
+description: "Install the Telescope Net Node Agent on Windows, macOS, or Linux. Pre-built installers, dev-mode source, service management, and sleep prevention covered."
 ---
 
 The Node Agent ships in two forms: a **pre-built installer** for most users, and a **dev-mode source install** for contributors and anyone who wants to run from the latest code. Both paths end up at the same place — a running Flask dashboard on port 5173 with the ALPACA control loop, photometry pipeline, and cloud communicator all active.
@@ -239,7 +239,7 @@ Dev mode runs `main.py` directly using a Python virtual environment. The watchdo
 |---|---|---|
 | Entry point | `main.py` watchdog | `src/main_service.py` directly |
 | File watching | Auto-restarts `src/dashboard.py` on changes | No subprocess — runs in-process |
-| Used by | Installers? | ✗ | ✓ |
+| Used by installers | ✗ | ✓ |
 | Suitable for | Development, debugging | Overnight science runs |
 
 When running from the command line in dev mode, use `Ctrl+C` to stop. The

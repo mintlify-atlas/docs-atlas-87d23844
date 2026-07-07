@@ -55,10 +55,10 @@ The member app is a standard Flutter project located in the `app/` directory of 
 
     ```bash
     # Simulator / web
-    flutter run --dart-define=BS_API_BASE=http://localhost:8800
+    flutter run --dart-define=API_BASE=http://localhost:8800
 
     # Physical device on the same LAN (replace with your host IP)
-    flutter run --dart-define=BS_API_BASE=http://192.168.1.20:8800
+    flutter run --dart-define=API_BASE=http://192.168.1.20:8800
     ```
 
     <Note>
@@ -94,8 +94,8 @@ static const String _productionBase = 'https://api.thetelescope.net';
 
 | Scenario | How to set the URL |
 |----------|-------------------|
-| Local development | `--dart-define=BS_API_BASE=http://localhost:8800` |
-| Local dev (alternate) | `--dart-define=API_BASE=http://localhost:8800` |
+| Local development | `--dart-define=API_BASE=http://localhost:8800` |
+| Local dev (legacy alias) | `--dart-define=BS_API_BASE=http://localhost:8800` |
 | Web build (same-origin) | No flag needed — derives from `Uri.base.origin` |
 | Production native build | No flag needed — falls back to `https://api.thetelescope.net` |
 
@@ -113,7 +113,7 @@ flutter build web
 To test the web build locally against the cloud server:
 
 ```bash
-flutter build web --dart-define=BS_API_BASE=http://localhost:8800
+flutter build web --dart-define=API_BASE=http://localhost:8800
 cd app/build/web
 python3 -m http.server 4280
 # Open http://localhost:4280
@@ -128,7 +128,7 @@ iOS builds require macOS and Xcode. The platform folder is at `app/ios/`.
 open app/ios/Runner.xcworkspace
 
 # Or build from the command line (requires a valid signing identity)
-flutter build ios --dart-define=BS_API_BASE=https://api.thetelescope.net
+flutter build ios --dart-define=API_BASE=https://api.thetelescope.net
 ```
 
 ### Native iOS Experiment
@@ -138,11 +138,11 @@ An experimental SwiftUI shell lives at `app/ios-native/BoundlessSkies.xcodeproj`
 ## Android Build
 
 ```bash
-flutter build apk --dart-define=BS_API_BASE=https://api.thetelescope.net
+flutter build apk --dart-define=API_BASE=https://api.thetelescope.net
 # Output: app/build/app/outputs/flutter-apk/app-release.apk
 
 # Or as an App Bundle for Play Store submission
-flutter build appbundle --dart-define=BS_API_BASE=https://api.thetelescope.net
+flutter build appbundle --dart-define=API_BASE=https://api.thetelescope.net
 ```
 
 ## Firebase Push Notifications
@@ -182,7 +182,7 @@ The app follows a provider-based state architecture. The key files are:
 
 ```
 app/lib/
-  config.dart              API base URL resolution (BS_API_BASE / API_BASE dart-define)
+  config.dart              API base URL resolution (API_BASE dart-define; BS_API_BASE legacy alias)
   main.dart                Entry point — Firebase init, AppState bootstrap, auth gate
   theme.dart               Dark theme (enlarged type scale, high-contrast palette)
   api/
@@ -198,7 +198,7 @@ app/lib/
     observations_tab.dart  Photometric history + night summaries
     notifications_tab.dart Alert inbox + mark-read
     help_tab.dart          Contact links, AI assistant chat, node diagnostics
-    more_tab.dart          Science program suggestions, settings, about
+    more_tab.dart          Help screen entry + science program suggestion entry
   services/push_service.dart  Firebase token registration + notification tap routing
   widgets/
     async_view.dart        Loading / error / empty state + pull-to-refresh helper

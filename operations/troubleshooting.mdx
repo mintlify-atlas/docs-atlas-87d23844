@@ -1,7 +1,7 @@
 ---
-title: "Troubleshoot Node Agent and Cloud Server Issues"
+title: "Troubleshoot Node Agent and Cloud Server Common Failures"
 sidebarTitle: "Troubleshooting"
-description: "Diagnose and fix common issues: ALPACA connection failures, plate-solve errors, AAVSO submission rejections, photometry quality problems, and weight-tuning monitor failures."
+description: "Diagnose Node Agent and cloud failures: ALPACA errors, plate-solve issues, AAVSO rejections, photometry quality problems, and weight-tuning faults."
 ---
 
 This page covers the most common failure modes for The Telescope Net Node Agent and cloud server. Issues are grouped by subsystem. Start with the quick diagnostic checklist below to rule out the most frequent causes before diving into specific accordion sections.
@@ -130,7 +130,7 @@ This page covers the most common failure modes for The Telescope Net Node Agent 
 <Accordion title="Submission rejected by WebObs">
   When a live submission is rejected, the raw WebObs error message is saved to the audit directory:
 
-  ```
+  ```text
   cloud_data/aavso_batches/YYYY-MM-DD/*_response.txt
   ```
 
@@ -203,14 +203,14 @@ This page covers the most common failure modes for The Telescope Net Node Agent 
   3. **Timing:** The monitor runs during the nightly maintenance window (typically 2–3 AM UTC). It does not run on demand. Check the cloud server logs the morning after enabling.
 
   4. **Check logs:** Search the cloud server log for the `cloud.tuning` logger:
-     ```
+     ```text
      "Tuning disabled — skipping nightly weight review"   → enabled is false
      "Tuning skipped — only N nights of data (need M)"   → insufficient history
      "Tuning skipped — only N measurements (need M)"     → insufficient data volume
      "Nightly tuning failed (weights unchanged): ..."    → exception — check the message
      ```
 
-  5. **Insufficient data:** Both `min_nights_for_tuning` (default 7) and `min_measurements` (default 30) must be satisfied within the `lookback_days` window before the first tuning run.
+  5. **Insufficient data:** Both `min_nights_data` (default 7) and `min_measurements` (default 30) must be satisfied within the `lookback_nights` window before the first tuning run.
 </Accordion>
 
 <Accordion title="Weight changes have no effect on the observation plan">
@@ -237,7 +237,7 @@ This page covers the most common failure modes for The Telescope Net Node Agent 
 
   | HTTP Status | Cause | Resolution |
   |-------------|-------|-----------|
-  | 429 | Anthropic rate limit | Reduce call frequency by increasing `tuning.lookback_days`; or temporarily set `tuning.enabled: false` |
+  | 429 | Anthropic rate limit | Reduce call frequency by increasing `tuning.lookback_nights`; or temporarily set `tuning.enabled: false` |
   | 401 | API key invalid or quota exhausted | Verify `ANTHROPIC_API_KEY` is correct and the Anthropic account has remaining credits |
   | Content policy | Evidence brief triggers a refusal (rare) | The apply step is skipped; a warning is logged; check `cloud.tuning` logger output |
 

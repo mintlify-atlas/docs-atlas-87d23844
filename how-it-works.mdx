@@ -1,7 +1,7 @@
 ---
-title: "How The Telescope Net Works End to End"
+title: "How It Works: Scheduling, Photometry, and Submission"
 sidebarTitle: "How It Works"
-description: "Follow a single observation from Seestar hardware through alert ingestion, scheduling, photometry, cross-validation, and final AAVSO submission — explained step by step."
+description: "Trace a single observation from the Seestar hardware through scoring, scheduling, aperture photometry, cross-validation, and final AAVSO submission."
 ---
 
 The Telescope Net turns a donated Seestar telescope into a node in a worldwide scientific instrument — automatically, every clear night, without any action from the member. This page traces the complete journey of a single observation: from the moment an alert arrives in the cloud to the moment a calibrated magnitude lands in the AAVSO database under the contributing member's name.
@@ -105,7 +105,7 @@ The cloud processes data through seven distinct layers, from raw alert stream to
 | Layer | Function | Implementation |
 |-------|----------|----------------|
 | **1 — Alert Ingestion** | Pull candidate targets from public astronomical streams | ALeRCE, ATLAS, ASAS-SN, AAVSO, Gaia, TNS polled hourly |
-| **2 — Scoring** | Rank every (target, node) pair with a composite score | Brightness × science × time-criticality × coverage-gap × observability |
+| **2 — Scoring** | Rank every (target, node) pair with a composite score | Weighted sum of six components: brightness match, scientific value, time criticality, coverage gap, observability, and science ROI |
 | **3 — Scheduling** | Generate nightly observation plans | CHORUS nightly greedy dispatch with real-time interrupt handling |
 | **4 — Node Control** | Operate the telescope hardware | ALPACA REST API via seestar_alp; SMB image retrieval |
 | **5 — Local Photometry** | Calibrate magnitudes from raw FITS | ASTAP plate solve → comparison stars → aperture photometry → differential |

@@ -1,7 +1,7 @@
 ---
 title: "CHORUS: Information-Theoretic Telescope Scheduling"
 sidebarTitle: "CHORUS"
-description: "CHORUS replaces heuristic composite scoring with a submodular information-gain objective — understanding how it models measurement quality, delivery probability, and scheduling as experiment design."
+description: "How CHORUS replaces heuristic scoring with a submodular information-gain objective: measurement quality, delivery probability, and fleet-wide assignment."
 ---
 
 The classic composite scorer asks: *how good is this (target, node) pairing?* CHORUS — **C**overage-kernel **H**ierarchical **O**ptimization for **R**eliability-weighted **U**tility of **S**amples — asks a different question entirely: **how much scientific information does this observation deliver that the network would not otherwise have?** Every coordination behaviour the network exhibits — redundancy avoidance, cadence shaping, longitude diversity, weather robustness — emerges as arithmetic from this single objective rather than from a set of hand-tuned multipliers.
@@ -100,7 +100,7 @@ The network objective is expected captured value plus an exploration bonus:
 
 The expectation over independent Bernoulli success indicators is exact and closed-form because of the product structure — no sampling, no simulation, fully deterministic.
 
-**Theorem:** Each term ν_u · (1 − Π(1 − p_o ρ_{u,o})) is a monotone submodular function of A. Therefore Φ is monotone submodular, and greedy maximization subject to the interval-scheduling and per-node capacity constraints inherits the classical near-optimality guarantees of submodular maximization over independence systems.
+**Theorem:** Each term ν_u · (1 − Π(1 − p_o ρ\_\{u,o\})) is a monotone submodular function of A. Therefore Φ is monotone submodular, and greedy maximization subject to the interval-scheduling and per-node capacity constraints inherits the classical near-optimality guarantees of submodular maximization over independence systems.
 
 ## The Unified Scheduling Equation
 
@@ -214,7 +214,7 @@ Templates are **declarative data** — rows in `class_templates`, seeded from co
 | **EB (eclipsing binaries)** | 32 phase bins from the ephemeris. ν^raw concentrated on primary/secondary eclipse bins (σ_ref 0.02–0.03), quadrature for the O'Connell effect, uniform low floor elsewhere. Phase ledger persists across nights — bins captured this season stay discounted. CHORUS sees zero marginal value sampling the same phase twice; it shifts to a node 90° west instead |
 | **EXOPLANET (transits)** | Event sub-window cells: pre-ingress baseline (≥ 45 min), ingress, mid, egress, post-egress baseline. ν^raw ∝ depth-normalised timing value × scarcity. Partial coverage by different nodes composes correctly — node A takes ingress + mid, node B (300 km east) takes egress |
 | **CV (cataclysmic variables)** | Quiescent: one detection-quality cell per hazard interval, ν^raw ∝ P(state change since last sample) = 1 − e^(−λ_cv · Δt). Outburst state: template swaps automatically to dense time cells with tight σ_ref — an automatic campaign escalation that fires before the next planning cycle |
-| **SN / transient** | Time + band cells. Early cells (rise/peak/early decline) carry ν^raw far above late-decline cells — age enters through which cells still exist, not an exp(−age/12) fudge. Band-specific cells exist only when a filtered node is in the fleet; that node alone sees ρ > 0 on colour cells |
+| **SN / transient** | Time + band cells. Early cells (rise/peak/early decline) carry ν^raw far above late-decline cells — age enters through which cells still exist, not an exp(−age/12) fudge. Band-specific cells exist only when a filtered node is in the fleet; that node alone sees ρ &gt; 0 on colour cells |
 | **LPV / Mira** | Sparse time cells, wide σ_ref, huge future opportunity count → tiny S_u. The network's ballast and nursery for new nodes |
 
 ## Three-Ring Tuning
@@ -244,7 +244,7 @@ The tuning system is elevated from "Claude nudges 30 weights" to a three-ring lo
     kernel_time_scale_h / kernel_phase_scale   sample locality per class
     value_scale_* (EB, CV, transient, …)       relative programme priorities
     scarcity_gamma, scarcity_horizon_nights    tonight vs the future
-    exploration_beta, w_e / w_a / w_κ         fleet-learning appetite
+    exploration_beta                           fleet-learning appetite
     same_site_repeat_factor                    weather-redundancy conservatism
     min_marginal, max_obs_per_target           breadth vs depth
     ```

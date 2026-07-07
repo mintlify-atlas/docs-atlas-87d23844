@@ -1,10 +1,85 @@
 ---
 title: "Node API Endpoints: Registration, Heartbeat, and Data Upload"
 sidebarTitle: "Node Endpoints"
-description: "REST endpoints used by node agents — registration with activation code, 60-second heartbeats, observation plan download, photometry upload, FITS images, and interrupt polling."
+description: "Node agent API: pairing, activation-code registration, heartbeats, plan download, photometry upload, AAVSO file storage, interrupt polling, config patches."
 ---
 
-Node endpoints form the data backbone of The Telescope Net. Every Seestar telescope running the node agent communicates exclusively through these routes — from the one-time registration that provisions its identity, through nightly heartbeats and plan downloads, to the photometry measurements and FITS images that flow back to the cloud after each observation. All endpoints except `POST /api/v1/nodes/register` require the `X-Node-Id` and `X-Api-Key` headers issued at registration.
+Node endpoints form the data backbone of The Telescope Net. Every Seestar telescope running the node agent communicates exclusively through these routes — from the one-time registration that provisions its identity, through nightly heartbeats and plan downloads, to the photometry measurements and FITS images that flow back to the cloud after each observation. All endpoints except `POST /api/v1/nodes/register`, `GET /api/v1/nodes/pair/{token}`, and `GET /api/v1/aavso-files` require the `X-Node-Id` and `X-Api-Key` headers issued at registration.
+
+---
+
+## POST /api/v1/nodes/pair
+
+Submit an activation code to a waiting node via a shared pairing token. The member app calls this endpoint after the user creates an activation code; the unregistered node polls `GET /api/v1/nodes/pair/{token}` to receive it.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** `Authorization: Bearer <token>` (member)
+
+    <ParamField body="pairing_token" type="string" required>
+      The pairing token displayed by the unregistered node agent (format `WORD-NNNN`, e.g. `NOVA-4821`).
+    </ParamField>
+
+    <ParamField body="activation_code" type="string" required>
+      The activation code in `BS-YYYY-XXXXXXXX` format to deliver to the node.
+    </ParamField>
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="ok" type="boolean">`true` when the code is stored for the node to collect.</ResponseField>
+
+    **400** is returned when either field is missing.
+
+    **404** is returned when the activation code does not exist.
+
+    **409** is returned when the activation code has already been used.
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl -X POST https://api.thetelescope.net/api/v1/nodes/pair \
+         -H "Authorization: Bearer <token>" \
+         -H "Content-Type: application/json" \
+         -d '{"pairing_token": "NOVA-4821", "activation_code": "BS-2026-ABCD1234"}'
+    ```
+
+    ```json
+    {"ok": true}
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## GET /api/v1/nodes/pair/{token}
+
+Poll for an activation code that the member app has pushed to this pairing token. The node agent calls this endpoint on a 30-second loop before it is registered. When a code is available it is returned and the entry is consumed — subsequent calls return `{"code": null}`.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** None
+
+    <ParamField path="token" type="string" required>
+      The pairing token shown by the node agent (e.g. `NOVA-4821`). Case-insensitive.
+    </ParamField>
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="code" type="string">
+      The activation code in `BS-YYYY-XXXXXXXX` format, or `null` when no code has been pushed yet.
+    </ResponseField>
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl https://api.thetelescope.net/api/v1/nodes/pair/NOVA-4821
+    ```
+
+    ```json
+    {"code": "BS-2026-ABCD1234"}
+    ```
+  </Tab>
+</Tabs>
 
 ---
 
@@ -267,6 +342,7 @@ Download the current nightly observation plan for this node. The plan is generat
             <ResponseField name="dec" type="float">Declination in decimal degrees.</ResponseField>
             <ResponseField name="expDur" type="float">Sub-frame exposure duration in seconds.</ResponseField>
             <ResponseField name="expCount" type="integer">Number of sub-frames to stack.</ResponseField>
+            <ResponseField name="binning" type="integer">Camera binning factor.</ResponseField>
             <ResponseField name="startTime" type="string">Scheduled start in node-local `HH:MM` format.</ResponseField>
             <ResponseField name="filter" type="string">Photometric filter to use.</ResponseField>
             <ResponseField name="score" type="float">Composite scheduling score (0–1) for this target on this node.</ResponseField>
@@ -339,6 +415,7 @@ Upload a single photometry measurement. The cloud validates the measurement agai
         <ParamField body="measurement.zero_point" type="float">Photometric zero-point for this frame.</ParamField>
         <ParamField body="measurement.zp_scatter" type="float">RMS scatter of comparison star zero-points.</ParamField>
         <ParamField body="measurement.fits_file" type="string">Filename of the source FITS frame (for traceability).</ParamField>
+        <ParamField body="measurement.sky_mag" type="float">Measured sky background brightness in mag/arcsec².</ParamField>
       </Expandable>
     </ParamField>
 
@@ -391,7 +468,7 @@ Upload a single photometry measurement. The cloud validates the measurement agai
 
 ## POST /api/v1/images
 
-Upload a raw FITS frame. The server stores the file under `cloud_data/images/` and returns a storage path. Images are retained for **14 days** before automatic pruning. File size is capped at the server's 128 MB content limit.
+Upload a raw FITS frame. The server stores the file under `cloud_data/images/` and returns a storage path. File size is capped at the server's 128 MB content limit.
 
 <Tabs>
   <Tab title="Request">
@@ -463,6 +540,136 @@ Upload an AAVSO Extended Format text file (`.txt`) generated by the node's photo
       "ok": true,
       "path": "2026-06-15/SS_Cyg_20260615.txt"
     }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## GET /api/v1/aavso-files
+
+List all uploaded AAVSO Extended Format text files, newest first. No authentication required — the list is public so operators can locate files to email to AAVSO.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** None
+
+    No query parameters.
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="files" type="array">
+      Array of file metadata objects, sorted newest-first.
+
+      <Expandable title="File fields">
+        <ResponseField name="path" type="string">Relative path under the AAVSO file root, e.g. `"2026-06-15/SS_Cyg_20260615.txt"`.</ResponseField>
+        <ResponseField name="size" type="integer">File size in bytes.</ResponseField>
+        <ResponseField name="modified" type="string">ISO 8601 UTC timestamp of last modification.</ResponseField>
+        <ResponseField name="download" type="string">URL path for downloading this file, e.g. `"/api/v1/aavso-files/download/2026-06-15/SS_Cyg_20260615.txt"`.</ResponseField>
+      </Expandable>
+    </ResponseField>
+
+    <ResponseField name="count" type="integer">Total number of files.</ResponseField>
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl https://api.thetelescope.net/api/v1/aavso-files
+    ```
+
+    ```json
+    {
+      "files": [
+        {
+          "path": "2026-06-15/SS_Cyg_20260615.txt",
+          "size": 2048,
+          "modified": "2026-06-15T11:00:00.000000+00:00",
+          "download": "/api/v1/aavso-files/download/2026-06-15/SS_Cyg_20260615.txt"
+        }
+      ],
+      "count": 1
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## GET /api/v1/aavso-files/download/{path}
+
+Download a specific AAVSO text file by its relative path. Returns the file as an attachment. Path traversal is blocked server-side.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** None
+
+    <ParamField path="path" type="string" required>
+      Relative path from the AAVSO file listing, e.g. `2026-06-15/SS_Cyg_20260615.txt`.
+    </ParamField>
+  </Tab>
+  <Tab title="Response">
+    **200 OK** — Binary file download with `Content-Disposition: attachment`.
+
+    **400** is returned for path traversal attempts.
+
+    **404** is returned when the file does not exist.
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl -O https://api.thetelescope.net/api/v1/aavso-files/download/2026-06-15/SS_Cyg_20260615.txt
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## POST /api/v1/incidents
+
+Report a structured reliability incident from the node agent. The cloud stores it in the `reliability_incidents` table, making hardware faults, slew failures, emergency parks, and similar events visible to remote operators the moment they occur.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** `X-Node-Id` + `X-Api-Key`
+
+    <ParamField body="incident_type" type="string" required>
+      Machine-readable event name, e.g. `"slew_failure"`, `"emergency_park"`, `"disk_full"`.
+    </ParamField>
+
+    <ParamField body="severity" type="string">
+      One of `"info"`, `"warning"`, `"error"`, or `"critical"`. Defaults to `"info"`.
+    </ParamField>
+
+    <ParamField body="target_name" type="string">
+      Target being observed when the incident occurred, if applicable.
+    </ParamField>
+
+    <ParamField body="detail" type="object">
+      Structured detail dict (max 4 KB after serialisation). Any extra fields beyond `incident_type` should go here.
+    </ParamField>
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="ok" type="boolean">`true` when the incident is recorded.</ResponseField>
+
+    **400** is returned when `incident_type` is missing.
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl -X POST https://api.thetelescope.net/api/v1/incidents \
+         -H "X-Node-Id: node_a3f9b2c1" \
+         -H "X-Api-Key: <api_key>" \
+         -H "Content-Type: application/json" \
+         -d '{
+           "incident_type": "slew_failure",
+           "severity": "error",
+           "target_name": "SS_Cyg",
+           "detail": {"error_code": "MOUNT_STALL", "az_deg": 210.5}
+         }'
+    ```
+
+    ```json
+    {"ok": true}
     ```
   </Tab>
 </Tabs>
@@ -556,6 +763,85 @@ Acknowledge receipt of an interrupt. Once acknowledged, the `acked` field is set
          -H "X-Node-Id: node_a3f9b2c1" \
          -H "X-Api-Key: <api_key>" \
          https://api.thetelescope.net/api/v1/interrupts/42/ack
+    ```
+
+    ```json
+    {"ok": true}
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## GET /api/v1/nodes/config-patches
+
+Retrieve pending `config.yaml` patches queued by the help assistant for this node. The node agent polls this endpoint alongside plan and interrupt polling to pick up any configuration changes pushed remotely.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** `X-Node-Id` + `X-Api-Key`
+
+    No request body or query parameters.
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="patches" type="array">
+      List of pending patch objects. Each patch has an `id` and a `patch` dict of config keys to update.
+    </ResponseField>
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl -H "X-Node-Id: node_a3f9b2c1" \
+         -H "X-Api-Key: <api_key>" \
+         https://api.thetelescope.net/api/v1/nodes/config-patches
+    ```
+
+    ```json
+    {
+      "patches": [
+        {
+          "id": 7,
+          "patch": {"photometry": {"min_snr": 12.0}}
+        }
+      ]
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## POST /api/v1/nodes/config-patches/{patch_id}/ack
+
+Acknowledge a config patch after applying it. Reports success or failure back to the cloud so the help assistant knows whether the change took effect.
+
+<Tabs>
+  <Tab title="Request">
+    **Auth:** `X-Node-Id` + `X-Api-Key`
+
+    <ParamField path="patch_id" type="integer" required>The patch ID from the config-patches list.</ParamField>
+
+    <ParamField body="ok" type="boolean">
+      `true` when the patch was applied successfully. Defaults to `true` if omitted.
+    </ParamField>
+
+    <ParamField body="error" type="string">
+      Error message (up to 500 characters) when `ok` is `false`.
+    </ParamField>
+  </Tab>
+  <Tab title="Response">
+    **200 OK**
+
+    <ResponseField name="ok" type="boolean">`true` when the acknowledgment is recorded.</ResponseField>
+  </Tab>
+  <Tab title="Example">
+    ```bash
+    curl -X POST https://api.thetelescope.net/api/v1/nodes/config-patches/7/ack \
+         -H "X-Node-Id: node_a3f9b2c1" \
+         -H "X-Api-Key: <api_key>" \
+         -H "Content-Type: application/json" \
+         -d '{"ok": true}'
     ```
 
     ```json

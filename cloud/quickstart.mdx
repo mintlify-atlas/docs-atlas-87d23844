@@ -1,7 +1,7 @@
 ---
-title: "Deploy the Cloud Server for Telescope Scheduling"
+title: "Cloud Server Quickstart: Run the Telescope Net API"
 sidebarTitle: "Quickstart"
-description: "Get the Telescope Net cloud server running locally in minutes — configure AAVSO credentials, start the Flask API, and verify node connectivity with the health endpoint."
+description: "Get the cloud server running locally: install dependencies, set AAVSO credentials, launch on port 8800, and confirm the health endpoint responds."
 ---
 
 The Telescope Net cloud server is a Flask API that sits at the centre of the whole network. It ingests alerts from half a dozen astronomical brokers every hour, scores every (target, node) pair, generates nightly observation plans for each connected Seestar, and batches accepted photometry to AAVSO WebObs — all with no manual intervention. This page walks you through running it locally in a few minutes.

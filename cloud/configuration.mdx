@@ -1,7 +1,7 @@
 ---
-title: "Cloud Server Configuration Reference"
+title: "Cloud Server Configuration Reference for config.yaml"
 sidebarTitle: "Configuration"
-description: "Complete reference for cloud/config.yaml — AAVSO credentials, server settings, database path, alert sources, scoring weights, and Claude weight tuning parameters."
+description: "Reference for cloud/config.yaml — server binding, database URL, alert broker settings, composite scoring weights, and Claude weight-tuning parameters."
 ---
 
 All cloud server behaviour is controlled by a single file: `cloud/config.yaml`. The server reads it at startup through `load_config()`, which recursively expands `${VAR}` references from the environment — so secrets never need to be committed to the file itself. This page documents every section and parameter.
@@ -96,9 +96,16 @@ alerts:
     enabled: true
     default_watchlist: true
     vsx_names: []
+  tess:
+    enabled: true
+    mag_limit: 12.0
+    min_depth_ppt: 5.0
+    max_duration_hours: 4.0
 ```
 
 `interval_minutes` controls how often the `alert-ingest` loop fires. `expire_days` deactivates transients that have not been seen by any source within that window. Each broker section has `enabled`, a `mag_limit` that caps how faint the ingested targets can be, and `days_back` controlling the historical lookback on each poll. TNS, ATLAS, and ASAS-SN require separate credentials — sources with blank credentials are skipped automatically without error.
+
+The `tess` section ingests upcoming TESS transit events. `mag_limit` caps the host-star V magnitude (Seestar S50 photometry requires V ≤ 12); `min_depth_ppt` filters out transits shallower than this threshold; `max_duration_hours` skips transits longer than 4 hours that cannot fit within a single night.
 
 ## scoring
 
@@ -149,6 +156,32 @@ These weights are **seed values only**. The live values are stored in the `tunin
 | `airmass` | Atmospheric extinction penalty — best airmass X=1 scores 1.0; X=3 scores 0 |
 | `window` | Fraction of the dark window the target is above the node's minimum altitude — at least 4 hours visible scores 1.0 |
 | `telescope` | Hardware suitability: aperture-limited magnitude headroom, field-of-view match to the target class |
+
+### Slot-quality weights
+
+```yaml
+scoring:
+  slot_quality_weights:
+    altitude:       0.35
+    cloud:          0.20
+    seeing:         0.15
+    transparency:   0.10
+    moon:           0.10
+    sky_brightness: 0.05
+    thermal:        0.05
+```
+
+These weights control the time-resolved within-night placement of an observation — how much each per-slot factor influences which slot a given observation is assigned to. Like the observability sub-weights, these are **seed values only** and are live-tuned in the `tuning_state` table.
+
+| Sub-weight | Role |
+|------------|------|
+| `altitude` | How high the target rides at this slot — airmass / atmospheric extinction |
+| `cloud` | Per-slot clear-sky fraction |
+| `seeing` | Per-slot atmospheric steadiness |
+| `transparency` | Per-slot extinction |
+| `moon` | Per-slot moon separation × illumination |
+| `sky_brightness` | Per-slot sky background level |
+| `thermal` | Uncooled-camera penalty on faint targets at warm slots |
 
 ## tuning
 
@@ -201,10 +234,120 @@ scheduler:
 |-----------|-------------|
 | `chorus` | `true` enables CHORUS as the live scheduler (default). Set `false` for instant rollback to the legacy path |
 | `chorus_shadow` | Runs the full CHORUS pipeline alongside the incumbent, recording telemetry and backtest archive without saving plans — the staged rollout path |
+| `network_optimizer` | `true` enables the previous marginal-value fleet optimizer; only effective when `chorus: false`. Defaults to `false` |
 | `local_search_ms` | Budget in milliseconds for the seeded deterministic local-search refinement after the greedy assignment pass |
 | `replan_interval_minutes` | How often the `replan` loop fires |
 | `min_score` | Targets scoring below this threshold are never scheduled |
+| `max_targets_per_night` | Hard cap on the number of distinct targets per node per night |
 | `sun_altitude_limit` | Sun altitude in degrees defining the start and end of the observing window (−12 = nautical darkness) |
+
+### Coordination knobs
+
+```yaml
+scheduler:
+  coordination:
+    redundancy_decay: 0.55
+    redundancy_diversity_sep: 90.0
+    cadence_bonus_strength: 1.0
+    slew_cost_weight: 1.0
+    slew_deg_per_s: 3.0
+    slew_settle_s: 15.0
+    filter_change_cost_s: 60.0
+    meridian_flip_cost_s: 120.0
+    preferred_target_boost: 0.10
+    robustness_cloud_relax: 0.20
+    slot_quality_floor: 0.50
+    local_search_aggressiveness: 1.0
+```
+
+These are **seed values only** — live values are stored in `tuning_state` and adjusted by the nightly weight-tuning monitor. All keys are bounded and clamped per run.
+
+| Knob | Description |
+|------|-------------|
+| `redundancy_decay` | Value retained per extra network observation of the same target (lower = punish redundant coverage harder) |
+| `redundancy_diversity_sep` | Longitude separation in degrees for full geographic diversity credit |
+| `cadence_bonus_strength` | How strongly the scheduler spreads samples across time gaps (0 = ignore cadence, 1 = full shaping) |
+| `slew_cost_weight` | Overall multiplier on slew overhead in the sequencer objective |
+| `slew_deg_per_s` | Assumed slew speed for overhead estimation |
+| `slew_settle_s` | Post-slew settle time added to every slew overhead |
+| `filter_change_cost_s` | Time cost of a filter wheel change |
+| `meridian_flip_cost_s` | Time cost of an equatorial mount meridian flip |
+| `preferred_target_boost` | Score boost applied to targets matching `preferred_targets` in the node's profile |
+| `robustness_cloud_relax` | Cloud-cutoff relaxation bonus for nodes with an enclosure or dew heater |
+| `slot_quality_floor` | Minimum per-slot quality score below which a slot is rejected |
+| `local_search_aggressiveness` | Annealing aggressiveness multiplier for the seeded local search |
+
+### CHORUS hyperparameters
+
+```yaml
+scheduler:
+  chorus_params:
+    scarcity_gamma: 0.93
+    scarcity_horizon_nights: 45.0
+    exploration_beta: 0.15
+    same_site_repeat_factor: 0.25
+```
+
+These are **seed values only** — live values are stored in `tuning_state`. Changes to this group are additionally validated by the deterministic backtest replay (see [CHORUS](/cloud/chorus)). The full key list and bounds are in `cloud/chorus/params.py`.
+
+| Parameter | Description |
+|-----------|-------------|
+| `scarcity_gamma` | Nightly discount factor on future capture chances in the T1 scarcity sweep |
+| `scarcity_horizon_nights` | How many future nights the T1 sweep looks ahead when pricing cells |
+| `exploration_beta` | Value placed on observations that reduce uncertainty about a node's performance |
+| `same_site_repeat_factor` | Weather-correlation cap: limits how much the solver can harvest independent sky-survival from multiple placements at the same site |
+
+## light_pollution
+
+```yaml
+light_pollution:
+  api_key: ''
+```
+
+| Parameter | Description |
+|-----------|-------------|
+| `api_key` | API key for lightpollutionmap.info. When blank, all nodes default to 20.0 mpsas (a moderately light-polluted sky). Obtain a key at lightpollutionmap.info to fetch real sky-quality values for each node's location |
+
+## help
+
+```yaml
+help:
+  openrouter_api_key: ''
+  model: anthropic/claude-haiku-4.5
+```
+
+| Parameter | Description |
+|-----------|-------------|
+| `openrouter_api_key` | OpenRouter API key for the member Help chat assistant. Leave blank to fall back to the `OPENROUTER_API_KEY` environment variable |
+| `model` | Model identifier used for the in-app AI help chat. Rate-limited to 5 user messages per week per member |
+
+## storage
+
+```yaml
+storage:
+  raw_image_dir: cloud_data/raw_images
+  raw_image_retention_days: 14
+  max_image_mb: 64
+```
+
+| Parameter | Description |
+|-----------|-------------|
+| `raw_image_dir` | Directory where uploaded raw FITS images are stored before the retention window expires |
+| `raw_image_retention_days` | Number of days to retain raw images before the daily maintenance loop prunes them |
+| `max_image_mb` | Maximum accepted size in megabytes for a single uploaded FITS image |
+
+## logging
+
+```yaml
+logging:
+  level: INFO
+  format: '%(asctime)s [%(levelname)s] %(name)s: %(message)s'
+```
+
+| Parameter | Description |
+|-----------|-------------|
+| `level` | Python logging level — `DEBUG`, `INFO`, `WARNING`, or `ERROR` |
+| `format` | `logging.basicConfig` format string applied to all cloud server log output |
 
 ## Database Schema
 
